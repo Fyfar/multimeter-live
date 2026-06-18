@@ -187,7 +187,7 @@ export function RealtimeChart({
       </div>
 
       {/* Chart canvas */}
-      <div className="relative h-56">
+      <div className="relative h-80">
         <canvas ref={canvasRef} />
       </div>
     </section>

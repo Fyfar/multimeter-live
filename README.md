@@ -18,6 +18,10 @@ running statistics, and export the result to CSV — no backend, no installation
 - **Rolling trend chart** (Chart.js) with selectable time windows — 10 s, 1 m, 5 m, 1 h
 - **Session logging** — start/stop recording with running statistics:
   average, min, max, peak-to-peak, sample count, and standard deviation (Welford)
+- **Trigger auto-logging** — arm a threshold and recording starts automatically
+  when the measured magnitude exceeds it, then stops once it falls back below
+  90 % of the threshold (hysteresis, so a signal hovering at the edge doesn't
+  flap logging on and off)
 - **Auto-scale or manual Y-axis range**, with out-of-range samples flagged on the chart
 - **CSV export** of the recorded session (timestamp, mode, value, unit)
 - **Configurable baud rate** (9600–115200)
