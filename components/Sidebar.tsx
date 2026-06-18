@@ -43,7 +43,7 @@ export function Sidebar({
           <button
             key={item.id}
             className={clsx(
-              'flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+              'flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
               item.id === 'dashboard' ? 'bg-accent text-white' : 'text-muted hover:bg-surface hover:text-fg',
             )}
           >
@@ -55,7 +55,7 @@ export function Sidebar({
 
       {/* Connection Card */}
       <div className="border-t border-border p-3">
-        <div className="space-y-3 rounded-xl border border-border bg-panel p-3">
+        <div className="space-y-3 rounded-lg border border-border bg-panel p-3">
           <h3 className="text-xs font-semibold text-fg">Connection</h3>
 
           <div className="space-y-2">
@@ -78,7 +78,7 @@ export function Sidebar({
                   value={baud}
                   onChange={(e) => onBaudChange(Number(e.target.value))}
                   disabled={connecting}
-                  className="rounded border border-border bg-surface px-1.5 py-0.5 text-xs text-fg disabled:opacity-50"
+                  className="rounded-sm border border-border bg-surface px-1.5 py-0.5 text-xs text-fg disabled:opacity-50"
                 >
                   {BAUD_RATES.map((b) => (
                     <option key={b} value={b}>{b}</option>
@@ -93,7 +93,7 @@ export function Sidebar({
           {connected ? (
             <button
               onClick={onDisconnect}
-              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-danger/30 bg-danger/10 py-1.5 text-xs font-medium text-danger transition-colors hover:bg-danger/20"
+              className="flex w-full items-center justify-center gap-1.5 rounded-md border border-danger/30 bg-danger/10 py-1.5 text-xs font-medium text-danger transition-colors hover:bg-danger/20"
             >
               <LogOut size={12} />
               Disconnect
@@ -102,7 +102,7 @@ export function Sidebar({
             <button
               onClick={onConnect}
               disabled={status === 'unsupported' || connecting}
-              className="w-full rounded-lg bg-accent py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+              className="w-full rounded-md bg-accent py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {connecting ? 'Connecting…' : 'Connect'}
             </button>

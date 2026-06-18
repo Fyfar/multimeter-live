@@ -25,7 +25,7 @@ function ActionButton({
       onClick={onClick}
       disabled={disabled}
       className={clsx(
-        'flex w-full items-center gap-2.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+        'flex w-full items-center gap-2.5 rounded-md border px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
         variant === 'active' && 'border-amber/30 bg-amber/10 text-amber hover:bg-amber/20',
         variant === 'danger' && 'border-danger/30 bg-danger/10 text-danger hover:bg-danger/20',
         variant === 'default' && 'border-border text-muted hover:bg-surface hover:text-fg',
@@ -166,7 +166,7 @@ function RangeField({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="mt-1 w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-right text-xs font-mono text-fg placeholder:text-border focus:border-accent focus:outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+        className="mt-1 w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-right text-xs font-mono text-fg placeholder:text-border focus:border-accent focus:outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
       />
     </div>
   );

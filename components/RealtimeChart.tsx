@@ -165,11 +165,11 @@ export function RealtimeChart({
   /* eslint-enable react-hooks/immutability */
 
   return (
-    <section className="rounded-xl border border-border bg-panel p-5">
+    <section className="rounded-lg border border-border bg-panel p-5">
       {/* Header */}
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-fg">Measurement Over Time</h2>
-        <div className="flex overflow-hidden rounded-lg border border-border">
+        <div className="flex overflow-hidden rounded-md border border-border">
           {TIME_RANGE_LABELS.map((r) => (
             <button
               key={r}

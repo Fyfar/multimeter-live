@@ -182,7 +182,7 @@ export default function Home() {
 
         {/* Actions */}
         <div className="flex items-center gap-2">
-          <button className="flex h-8 w-8 items-center justify-center rounded-lg border border-border text-muted transition-colors hover:bg-surface hover:text-fg">
+          <button className="flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted transition-colors hover:bg-surface hover:text-fg">
             <MoreVertical size={14} />
           </button>
         </div>
