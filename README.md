@@ -15,7 +15,8 @@ running statistics, and export the result to CSV — no backend, no installation
 ## Features
 
 - **Live digital readout** of the current measurement, mode, unit, and resolution
-- **Rolling trend chart** (Chart.js) with selectable time windows — 10 s, 1 m, 5 m, 1 h
+- **Rolling trend chart** (Chart.js) with selectable time windows — 10 s, 1 m, 5 m,
+  1 h, or **all** (plots the entire session uncapped; shows a performance note)
 - **Session logging** — start/stop recording with running statistics:
   average, min, max, peak-to-peak, sample count, and standard deviation (Welford)
 - **Trigger auto-logging** — arm a threshold and recording starts automatically

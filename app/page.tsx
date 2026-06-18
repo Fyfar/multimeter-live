@@ -61,6 +61,8 @@ export default function Home() {
   const unitRef = useRef<string>('');
   const triggerArmedRef = useRef(triggerArmed);
   const triggerThresholdRef = useRef<number | null>(null);
+  // Mirror of timeRange read synchronously in the async read loop (skip cap in 'all').
+  const timeRangeRef = useRef(timeRange);
   // Whether the current session was auto-started by the trigger (scopes auto-stop).
   const triggerStartedRef = useRef(false);
 
@@ -72,6 +74,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => { autoScaleRef.current = autoScale; }, [autoScale]);
+  useEffect(() => { timeRangeRef.current = timeRange; }, [timeRange]);
   useEffect(() => { triggerArmedRef.current = triggerArmed; }, [triggerArmed]);
   useEffect(() => { triggerThresholdRef.current = toFinite(triggerThreshold); }, [triggerThreshold]);
 
@@ -164,6 +167,8 @@ export default function Home() {
       if (newPoints.length > 0) {
         setChartPoints((prev) => {
           const combined = [...prev, ...newPoints];
+          // 'all' mode accumulates the full session — skip the rolling cap.
+          if (timeRangeRef.current === 'all') return combined;
           return combined.length > MAX_CHART_POINTS
             ? combined.slice(combined.length - MAX_CHART_POINTS)
             : combined;
