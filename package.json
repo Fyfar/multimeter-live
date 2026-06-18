@@ -2,7 +2,7 @@
   "name": "multimeter-live",
   "version": "0.1.0",
   "private": true,
-  "description": "Real-time multimeter dashboard in the browser over the Web Serial API — live readings, trend chart, and CSV export. No backend.",
+  "description": "Real-time browser dashboard for the ZOYI ZT703s multimeter over the Web Serial API — live readings, trend chart, session stats, and CSV export. No backend.",
   "license": "MIT",
   "author": "Fyfar (https://github.com/Fyfar)",
   "homepage": "https://github.com/Fyfar/multimeter-live#readme",
@@ -11,6 +11,8 @@
     "url": "git+https://github.com/Fyfar/multimeter-live.git"
   },
   "keywords": [
+    "zoyi",
+    "zt703s",
     "web-serial",
     "multimeter",
     "nextjs",

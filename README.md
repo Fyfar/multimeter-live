@@ -1,11 +1,16 @@
 # Multimeter·Live
 
-Real-time multimeter dashboard that runs entirely in the browser. Connect a USB
-multimeter over the **Web Serial API**, watch live readings on a large digital
-display and a rolling trend chart, capture a logging session with running
-statistics, and export the result to CSV — no backend, no installation.
+Real-time dashboard for the **ZOYI ZT703s** multimeter, running entirely in the
+browser. Connect the meter over the **Web Serial API**, watch live readings on a
+large digital display and a rolling trend chart, capture a logging session with
+running statistics, and export the result to CSV — no backend, no installation.
 
 ![Stack: Next.js · React · TypeScript · Tailwind · Chart.js](https://img.shields.io/badge/stack-Next.js%2016%20·%20React%2019%20·%20TypeScript%20·%20Tailwind%20v4-3b82f6)
+
+> **Device support:** This app is built specifically for the **ZOYI ZT703s** and
+> its serial packet format. The **ZT703s+** and **ZT706** likely use the same
+> protocol and may work, but they are **untested**. Other multimeters are not
+> supported — the parser is tuned to this meter's exact token/unit scheme.
 
 ## Features
 
@@ -22,10 +27,10 @@ statistics, and export the result to CSV — no backend, no installation.
 
 ## Requirements
 
+- A **ZOYI ZT703s** multimeter connected over USB serial (see device note above).
 - A **Chromium-based browser** (Chrome, Edge, Opera). The Web Serial API is not
   available in Firefox or Safari.
 - A served origin of **`https://` or `localhost`** — Web Serial requires a secure context.
-- A USB multimeter that streams ASCII measurements over a serial connection.
 
 ## Getting Started
 
@@ -49,36 +54,6 @@ npm run start
 ```sh
 npm run lint
 ```
-
-## Architecture
-
-The app is **client-only** — all parsing and processing happen in the browser;
-there are no API routes or server-side data fetching (Web Serial is browser-only
-and cannot be proxied).
-
-```
-app/page.tsx            Orchestrator: Web Serial lifecycle, session state, CSV export
-components/
-  DigitalDisplay.tsx    Current reading, mode, resolution
-  RealtimeChart.tsx     Chart.js line chart with streaming updates
-  StatisticsPanel.tsx   Session statistics
-  Controls.tsx          Recording, Y-range, export controls
-  Sidebar.tsx           Connection panel
-lib/
-  parser.ts             Stateful, buffer-safe parser for the serial stream
-  useSerial.ts          Web Serial lifecycle hook (connect, read loop, cleanup)
-```
-
-The serial parser buffers raw chunks and only emits a measurement once the next
-token delimits its end, so a packet cut mid-word never loses data.
-
-## Stack
-
-- [Next.js](https://nextjs.org/) 16 (App Router, client-only)
-- React 19
-- TypeScript 5
-- Tailwind CSS v4
-- Chart.js 4 (tree-shaken to the components actually used)
 
 ## License
 
