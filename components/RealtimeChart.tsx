@@ -22,18 +22,18 @@ export interface ChartPoint {
   oor?: boolean;    // out-of-range: outside user-defined min/max
 }
 
-export type TimeRange = '10s' | '1m' | '5m' | '1h' | 'all';
+export type TimeRange = '10s' | '1m' | '10m' | '1h' | 'all';
 
 const TIME_RANGE_MS: Record<TimeRange, number> = {
   '10s': 10_000,
   '1m': 60_000,
-  '5m': 300_000,
+  '10m': 600_000,
   '1h': 3_600_000,
   // Infinity disables the window filter so every buffered point is plotted.
   all: Infinity,
 };
 
-const TIME_RANGE_LABELS: TimeRange[] = ['10s', '1m', '5m', '1h', 'all'];
+const TIME_RANGE_LABELS: TimeRange[] = ['10s', '1m', '10m', '1h', 'all'];
 
 export function RealtimeChart({
   data,
