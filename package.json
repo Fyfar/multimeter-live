@@ -1,0 +1,47 @@
+{
+  "name": "multimeter-live",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Real-time multimeter dashboard in the browser over the Web Serial API — live readings, trend chart, and CSV export. No backend.",
+  "license": "MIT",
+  "author": "Fyfar (https://github.com/Fyfar)",
+  "homepage": "https://github.com/Fyfar/multimeter-live#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Fyfar/multimeter-live.git"
+  },
+  "keywords": [
+    "web-serial",
+    "multimeter",
+    "nextjs",
+    "react",
+    "chartjs",
+    "realtime",
+    "dashboard",
+    "typescript"
+  ],
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "chart.js": "^4.5.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.20.0",
+    "next": "16.2.7",
+    "react": "19.2.4",
+    "react-dom": "19.2.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.1",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.2.7",
+    "tailwindcss": "^4.3.1",
+    "typescript": "^5"
+  }
+}
