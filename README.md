@@ -7,37 +7,48 @@ running statistics, and export the result to CSV — no backend, no installation
 
 ![Stack: Next.js · React · TypeScript · Tailwind · Chart.js](https://img.shields.io/badge/stack-Next.js%2016%20·%20React%2019%20·%20TypeScript%20·%20Tailwind%20v4-3b82f6)
 
-> **Device support:** This app is built specifically for the **ZOYI ZT703s** and
-> its serial packet format. The **ZT703s+** and **ZT706** likely use the same
-> protocol and may work, but they are **untested**. Other multimeters are not
-> supported — the parser is tuned to this meter's exact token/unit scheme.
+## Live demo
+
+**<https://fyfar.github.io/multimeter-live/>**
+
+Open it in a Chromium-based browser, connect your meter, and click **Connect**.
+Everything runs locally in your browser — no data leaves your machine.
+
+> **Not an official ZOYI / ZOTEK product.** Multimeter·Live is an independent,
+> community-built project and is **not affiliated with, endorsed by, or supported
+> by ZOYI or ZOTEK**. "ZOYI", "ZOTEK", and "ZT703s" are referenced only to describe
+> the hardware this tool works with.
+
+> **Device support:** Built specifically for the **ZOYI ZT703s** and its serial
+> packet format. The **ZT703s+** and **ZT706** likely use the same protocol and may
+> work, but they are **untested**. Other multimeters are not supported.
 
 ## Features
 
 - **Live digital readout** of the current measurement, mode, unit, and resolution
-- **Rolling trend chart** (Chart.js) with selectable time windows — 10 s, 1 m, 10 m,
-  1 h, or **all** (plots the entire session uncapped; shows a performance note)
-- **Session logging** — start/stop recording with running statistics:
-  average, min, max, peak-to-peak, sample count, and standard deviation (Welford)
-- **Trigger auto-logging** — arm a threshold and recording starts automatically
-  when the measured magnitude exceeds it, then stops once it falls back below
-  90 % of the threshold (hysteresis, so a signal hovering at the edge doesn't
-  flap logging on and off)
+- **Rolling trend chart** with selectable time windows — 10 s, 1 m, 10 m, 1 h, or
+  **all** (plots the entire session)
+- **Session logging** with running statistics: average, min, max, peak-to-peak,
+  sample count, and standard deviation
+- **Trigger auto-logging** — arm a threshold and recording starts automatically when
+  the measured magnitude crosses it, then stops once it falls back below (hysteresis,
+  so a signal hovering at the edge doesn't flap logging on and off)
 - **Auto-scale or manual Y-axis range**, with out-of-range samples flagged on the chart
 - **CSV export** of the recorded session (timestamp, mode, value, unit)
 - **Configurable baud rate** (9600–115200)
 - Supported modes: voltage, current, resistance, continuity, diode, capacitance.
-  Values are normalized to canonical base units (e.g. mV → V) so a mid-stream
-  unit switch doesn't make the chart jump.
+  Values are normalized to canonical base units (e.g. mV → V) so a mid-stream unit
+  switch doesn't make the chart jump.
 
 ## Requirements
 
 - A **ZOYI ZT703s** multimeter connected over USB serial (see device note above).
 - A **Chromium-based browser** (Chrome, Edge, Opera). The Web Serial API is not
   available in Firefox or Safari.
-- A served origin of **`https://` or `localhost`** — Web Serial requires a secure context.
+- A served origin of **`https://` or `localhost`** — Web Serial requires a secure
+  context. The live demo is served over HTTPS, so it works out of the box.
 
-## Getting Started
+## Run it locally
 
 ```sh
 npm install
@@ -47,18 +58,11 @@ npm run dev
 Open [http://localhost:3000](http://localhost:3000), click **Connect**, and pick
 your serial port from the browser prompt.
 
-## Build
+## Contributing
 
-```sh
-npm run build
-npm run start
-```
-
-## Lint
-
-```sh
-npm run lint
-```
+Issues and pull requests are welcome! If you have a ZT703s+ or ZT706 and can confirm
+whether it works, or you'd like to add a feature or fix a bug, please open an
+[issue](https://github.com/Fyfar/multimeter-live/issues) or send a PR.
 
 ## License
 
