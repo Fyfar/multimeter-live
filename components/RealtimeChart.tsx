@@ -12,6 +12,7 @@ import {
   BarElement,
   PointElement,
   Filler,
+  Decimation,
   Tooltip,
   Legend,
   type ChartConfiguration,
@@ -27,6 +28,7 @@ Chart.register(
   BarElement,
   PointElement,
   Filler,
+  Decimation,
   Tooltip,
   Legend,
 );
@@ -175,51 +177,134 @@ const AXIS_COLOR = '#8b949e';
 const GRID_COLOR = 'rgba(48,54,61,0.5)';
 const MONO_FONT = { size: 11, family: 'var(--font-geist-mono)' };
 
-/** Build the (chart-type-dependent) Chart.js configuration. Histogram → bar of
- *  sample counts with a value x-axis; line → value-over-time area. */
-function buildChartConfig(isHistogram: boolean, unit: string): ChartConfiguration {
-  const dataset = isHistogram
-    ? {
-        label: 'samples',
-        data: [],
-        backgroundColor: 'rgba(59,130,246,0.6)',
-        borderColor: '#3b82f6',
-        borderWidth: 1,
-        categoryPercentage: 1,
-        barPercentage: 1,
-      }
-    : {
-        label: 'value',
-        data: [],
-        borderColor: '#3b82f6',
-        backgroundColor: 'rgba(59,130,246,0.07)',
-        borderWidth: 2,
-        pointRadius: 0,
-        tension: 0,
-        normalized: true,
-        fill: true,
-      };
+const TOOLTIP_STYLE = {
+  backgroundColor: '#1c2128',
+  borderColor: '#30363d',
+  borderWidth: 1,
+  titleColor: '#f0f6fc',
+  bodyColor: AXIS_COLOR,
+  titleFont: { family: 'var(--font-geist-mono)', size: 11 },
+  bodyFont: { family: 'var(--font-geist-mono)', size: 12 },
+  padding: 8,
+} as const;
 
+/** Format an absolute timestamp (ms) as a label relative to the window's latest
+ *  point: 'Now' for the newest, otherwise a signed second offset like '-12s'. */
+function formatTimeOffset(ts: number, latestTs: number): string {
+  const off = Math.round((ts - latestTs) / 1000);
+  return off === 0 ? 'Now' : `${off}s`;
+}
+
+/** Build the (chart-type-dependent) Chart.js configuration. Histogram → bar of
+ *  sample counts with a value x-axis; line → value-over-time area on a linear
+ *  time axis (required by the decimation plugin — see the line branch). */
+function buildChartConfig(isHistogram: boolean, unit: string): ChartConfiguration {
+  if (isHistogram) {
+    return {
+      type: 'bar',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: 'samples',
+            data: [],
+            backgroundColor: 'rgba(59,130,246,0.6)',
+            borderColor: '#3b82f6',
+            borderWidth: 1,
+            categoryPercentage: 1,
+            barPercentage: 1,
+          },
+        ],
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { intersect: false, mode: 'index' },
+        scales: {
+          x: {
+            title: { display: true, text: unit, color: AXIS_COLOR, font: { size: 11 } },
+            ticks: { color: AXIS_COLOR, maxTicksLimit: 9, maxRotation: 0, minRotation: 0, font: MONO_FONT },
+            grid: { color: GRID_COLOR },
+            border: { color: GRID_COLOR },
+          },
+          y: {
+            title: { display: true, text: 'Samples', color: AXIS_COLOR, font: { size: 11 } },
+            beginAtZero: true,
+            ticks: { color: AXIS_COLOR, font: MONO_FONT },
+            grid: { color: GRID_COLOR },
+            border: { color: GRID_COLOR },
+          },
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: TOOLTIP_STYLE,
+        },
+      },
+    };
+  }
+
+  // Line: a LINEAR time x-axis (ms timestamps as {x,y}) with parsing disabled so
+  // the built-in decimation plugin can downsample (it requires a linear/time axis
+  // + parsing:false + sorted data — all satisfied here). This, plus the linear
+  // axis pinning points to absolute positions, fixes the phantom *moving* spikes
+  // that appeared past ~1300 samples on the old category axis. `min-max` keeps
+  // both extremes of every pixel column, so a real transient is never visually
+  // dropped (the right guarantee for a meter); the trade-off is that sparse ±1 LSD
+  // noise still reads as a faint zig-zag band. Note the plugin only engages above
+  // 4×(chart CSS width) points (Chart.js default threshold).
+  // Per-point styling is scriptable (reads ctx.raw.oor) so it survives decimation.
   return {
-    type: isHistogram ? 'bar' : 'line',
-    data: { labels: [], datasets: [dataset] },
+    type: 'line',
+    data: {
+      datasets: [
+        {
+          label: 'value',
+          data: [],
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,0.07)',
+          borderWidth: 2,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          pointRadius: (ctx: any) => (ctx.raw?.oor ? 4 : 0),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          pointBackgroundColor: (ctx: any) => (ctx.raw?.oor ? '#ef4444' : '#3b82f6'),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          pointBorderColor: (ctx: any) => (ctx.raw?.oor ? '#ef4444' : '#3b82f6'),
+          tension: 0,
+          normalized: true,
+          fill: true,
+        },
+      ],
+    },
     options: {
       animation: false,
       responsive: true,
       maintainAspectRatio: false,
+      parsing: false, // {x,y} data — required by the decimation plugin
       interaction: { intersect: false, mode: 'index' },
       scales: {
         x: {
-          title: isHistogram
-            ? { display: true, text: unit, color: AXIS_COLOR, font: { size: 11 } }
-            : { display: false },
-          ticks: { color: AXIS_COLOR, maxTicksLimit: 9, maxRotation: 0, minRotation: 0, font: MONO_FONT },
+          type: 'linear',
+          title: { display: false },
+          ticks: {
+            color: AXIS_COLOR,
+            maxTicksLimit: 9,
+            maxRotation: 0,
+            minRotation: 0,
+            font: MONO_FONT,
+            // `this` is the scale; this.max is the newest plotted timestamp ('Now').
+            callback(this: { max?: number }, value: string | number) {
+              return typeof value === 'number' && this.max != null
+                ? formatTimeOffset(value, this.max)
+                : (value as string);
+            },
+          },
           grid: { color: GRID_COLOR },
           border: { color: GRID_COLOR },
         },
         y: {
-          title: { display: true, text: isHistogram ? 'Samples' : unit, color: AXIS_COLOR, font: { size: 11 } },
-          beginAtZero: isHistogram,
+          title: { display: true, text: unit, color: AXIS_COLOR, font: { size: 11 } },
+          beginAtZero: false,
           ticks: { color: AXIS_COLOR, font: MONO_FONT },
           grid: { color: GRID_COLOR },
           border: { color: GRID_COLOR },
@@ -227,15 +312,17 @@ function buildChartConfig(isHistogram: boolean, unit: string): ChartConfiguratio
       },
       plugins: {
         legend: { display: false },
+        decimation: { enabled: true, algorithm: 'min-max' },
         tooltip: {
-          backgroundColor: '#1c2128',
-          borderColor: '#30363d',
-          borderWidth: 1,
-          titleColor: '#f0f6fc',
-          bodyColor: AXIS_COLOR,
-          titleFont: { family: 'var(--font-geist-mono)', size: 11 },
-          bodyFont: { family: 'var(--font-geist-mono)', size: 12 },
-          padding: 8,
+          ...TOOLTIP_STYLE,
+          callbacks: {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            title: (items: any[]) => {
+              const x = items[0]?.parsed?.x;
+              const max = items[0]?.chart?.scales?.x?.max;
+              return typeof x === 'number' && max != null ? formatTimeOffset(x, max) : '';
+            },
+          },
         },
       },
     },
@@ -308,29 +395,15 @@ export function RealtimeChart({
 
     const now = Date.now();
     const windowMs = TIME_RANGE_MS[timeRange];
-    const filtered = data.filter((p) => now - p.ts <= windowMs);
-    const latestTs = filtered.length > 0 ? filtered[filtered.length - 1].ts : now;
-
-    const labels: string[] = [];
-    const values: number[] = [];
-    const radii: number[] = [];
-    const colors: string[] = [];
-
-    for (const d of filtered) {
-      const offsetSec = Math.round((d.ts - latestTs) / 1000);
-      labels.push(offsetSec === 0 ? 'Now' : `${offsetSec}s`);
-      values.push(d.v);
-      radii.push(d.oor ? 4 : 0);
-      colors.push(d.oor ? '#ef4444' : '#3b82f6');
+    // {x: timestamp, y: value, oor} for the linear axis + parsing:false; the
+    // decimation plugin min-max downsamples this to the canvas width before draw.
+    const points: { x: number; y: number; oor?: boolean }[] = [];
+    for (const d of data) {
+      if (now - d.ts <= windowMs) points.push({ x: d.ts, y: d.v, oor: d.oor });
     }
 
-    chart.data.labels = labels;
-    chart.data.datasets[0].data = values;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const ds = chart.data.datasets[0] as any;
-    ds.pointRadius = radii;
-    ds.pointBackgroundColor = colors;
-    ds.pointBorderColor = colors;
+    chart.data.datasets[0].data = points as any;
 
     const yScale = chart.options.scales?.y as
       | { title?: { text?: string }; min?: number; max?: number }

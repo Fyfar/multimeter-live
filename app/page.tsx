@@ -11,6 +11,9 @@ import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { DataLog, type LoggedRow } from '@/components/DataLog';
 import { normalizeReading, readingResolution, resolutionDecimals, type Reading } from '@/lib/parser';
 import { useSerial, type SerialStatus } from '@/lib/useSerial';
+// App version — single source of truth is package.json "version". Bump it on every
+// change (see AGENTS.md "Versioning") so the footer reflects what's deployed.
+import { version as APP_VERSION } from '@/package.json';
 
 const MAX_CHART_POINTS = 3600;
 // Trigger auto-stop releases at RELEASE_RATIO × threshold (hysteresis dead-band)
@@ -476,7 +479,7 @@ export default function Home() {
       {/* ── Footer ── */}
       <footer className="flex h-8 shrink-0 items-center justify-center border-t border-border">
         <p className="text-xs text-muted">
-          Multimeter Visualizer v1.0.0 &nbsp;·&nbsp; Built for precision.
+          Multimeter Visualizer v{APP_VERSION} &nbsp;·&nbsp; Built for precision.
         </p>
       </footer>
     </div>

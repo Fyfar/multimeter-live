@@ -1,6 +1,6 @@
 {
   "name": "multimeter-live",
-  "version": "0.1.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Real-time browser dashboard for the ZOYI ZT703s multimeter over the Web Serial API — live readings, trend chart, session stats, and CSV export. No backend.",
   "license": "MIT",
