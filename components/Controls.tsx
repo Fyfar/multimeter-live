@@ -17,7 +17,7 @@ export function ActionButton({
   onClick?: () => void;
   icon: React.ReactNode;
   label: string;
-  variant?: 'default' | 'active' | 'danger';
+  variant?: 'default' | 'active' | 'danger' | 'success';
   disabled?: boolean;
 }) {
   return (
@@ -28,6 +28,7 @@ export function ActionButton({
         'flex w-full items-center gap-2.5 rounded-md border px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
         variant === 'active' && 'border-amber/30 bg-amber/10 text-amber hover:bg-amber/20',
         variant === 'danger' && 'border-danger/30 bg-danger/10 text-danger hover:bg-danger/20',
+        variant === 'success' && 'border-success/30 bg-success/10 text-success hover:bg-success/20',
         variant === 'default' && 'border-border text-muted hover:bg-surface hover:text-fg',
       )}
     >
@@ -168,7 +169,7 @@ export function Controls({
               onClick={onToggleRecord}
               icon={recording ? <Square size={12} /> : <Play size={12} />}
               label={recording ? 'Stop Logging' : 'Start Logging'}
-              variant={recording ? 'active' : 'default'}
+              variant={recording ? 'danger' : 'success'}
               disabled={!recording && !canRecord}
             />
             <ActionButton
