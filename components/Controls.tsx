@@ -182,6 +182,7 @@ export function Controls({
               onClick={onClear}
               icon={<Trash2 size={12} />}
               label="Clear Data"
+              variant="danger"
             />
           </div>
         </div>
