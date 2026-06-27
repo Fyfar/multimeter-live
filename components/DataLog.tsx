@@ -1,7 +1,7 @@
 'use client';
 
 import { memo, useMemo, useState } from 'react';
-import { Search, Download, Pause, Play, Trash2 } from 'lucide-react';
+import { Search, Download, Square, Play, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { MODE_LABELS, type Reading } from '@/lib/parser';
 import { StatisticsPanel, type SessionStats } from '@/components/StatisticsPanel';
@@ -27,6 +27,7 @@ export function DataLog({
   stats,
   unit,
   decimals,
+  canRecord,
   onExportCsv,
   onToggleRecord,
   onClear,
@@ -38,6 +39,7 @@ export function DataLog({
   stats: SessionStats | null;
   unit: string;
   decimals?: number;
+  canRecord: boolean;
   onExportCsv: () => void;
   onToggleRecord: () => void;
   onClear: () => void;
@@ -179,9 +181,10 @@ export function DataLog({
             <div className="space-y-1.5">
               <ActionButton
                 onClick={onToggleRecord}
-                icon={recording ? <Pause size={12} /> : <Play size={12} />}
-                label={recording ? 'Pause Logging' : 'Resume Logging'}
-                variant={recording ? 'active' : 'default'}
+                icon={recording ? <Square size={12} /> : <Play size={12} />}
+                label={recording ? 'Stop Logging' : 'Start Logging'}
+                variant={recording ? 'danger' : 'success'}
+                disabled={!recording && !canRecord}
               />
               <ActionButton
                 onClick={onClear}

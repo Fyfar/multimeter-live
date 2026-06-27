@@ -11,7 +11,8 @@ running statistics, and export the result to CSV — no backend, no installation
 
 **<https://fyfar.github.io/multimeter-live/>**
 
-Open it in a Chromium-based browser, connect your meter, and click **Connect**.
+Open it in a supported browser (Chrome, Edge, Opera, or Firefox 151+), connect
+your meter, and click **Connect**.
 Everything runs locally in your browser — no data leaves your machine.
 
 ### Install & offline
@@ -56,8 +57,10 @@ update.
 ## Requirements
 
 - A **ZOYI ZT703s** multimeter connected over USB serial (see device note above).
-- A **Chromium-based browser** (Chrome, Edge, Opera). The Web Serial API is not
-  available in Firefox or Safari.
+- A browser with the **Web Serial API**: any **Chromium-based browser** (Chrome,
+  Edge, Opera) or **Firefox 151+** on desktop ([added May 2026](https://hacks.mozilla.org/2026/05/web-serial-support-in-firefox/)).
+  Safari is not supported. On Firefox Enterprise builds, Web Serial is disabled by default
+  and must be enabled via the `DefaultSerialGuardSetting` policy.
 - A served origin of **`https://` or `localhost`** — Web Serial requires a secure
   context. The live demo is served over HTTPS, so it works out of the box.
 
