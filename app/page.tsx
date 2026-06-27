@@ -468,6 +468,7 @@ export default function Home() {
             stats={sessionStats}
             unit={chartUnit}
             decimals={statDecimals}
+            canRecord={status === 'connected'}
             onExportCsv={exportCsv}
             onToggleRecord={handleToggleRecord}
             onClear={flushSession}
