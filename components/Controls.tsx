@@ -2,6 +2,7 @@
 
 import { Download, Play, Square, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
+import { Toggle } from '@/components/Toggle';
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return <h3 className="mb-3 text-xs font-semibold text-fg">{children}</h3>;
@@ -34,28 +35,6 @@ export function ActionButton({
     >
       {icon}
       {label}
-    </button>
-  );
-}
-
-function Toggle({ checked, onChange, disabled }: { checked: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
-  return (
-    <button
-      role="switch"
-      aria-checked={checked}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-      className={clsx(
-        'relative h-5 w-9 flex-shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40',
-        checked ? 'bg-accent' : 'border border-border bg-surface',
-      )}
-    >
-      <span
-        className={clsx(
-          'absolute left-0 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
-          checked ? 'translate-x-[18px]' : 'translate-x-0.5',
-        )}
-      />
     </button>
   );
 }

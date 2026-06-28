@@ -1,20 +1,22 @@
 'use client';
 
-import { FileText, LayoutDashboard, LogOut } from 'lucide-react';
+import { FileText, LayoutDashboard, LogOut, Settings } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { SerialStatus } from '@/lib/useSerial';
 
 const BAUD_RATES = [9600, 19200, 38400, 57600, 115200];
 
-export type NavId = 'dashboard' | 'data-log';
+export type NavId = 'dashboard' | 'data-log' | 'settings';
 const NAV_ITEMS: { id: NavId; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'data-log', label: 'Data Log' },
+  { id: 'settings', label: 'Settings' },
 ];
 
 const NAV_ICONS: Record<NavId, React.ReactNode> = {
   dashboard: <LayoutDashboard size={15} />,
   'data-log': <FileText size={15} />,
+  settings: <Settings size={15} />,
 };
 
 export function Sidebar({
