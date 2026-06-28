@@ -7,6 +7,8 @@ running statistics, and export the result to CSV — no backend, no installation
 
 ![Stack: Next.js · React · TypeScript · Tailwind · Chart.js](https://img.shields.io/badge/stack-Next.js%2016%20·%20React%2019%20·%20TypeScript%20·%20Tailwind%20v4-3b82f6)
 
+![Multimeter·Live dashboard — live digital readout, trend chart, and session statistics](./images/dashboard.png)
+
 ## Live demo
 
 **<https://fyfar.github.io/multimeter-live/>**
@@ -15,13 +17,19 @@ Open it in a supported browser (Chrome, Edge, Opera, or Firefox 151+), connect
 your meter, and click **Connect**.
 Everything runs locally in your browser — no data leaves your machine.
 
-### Install & offline
+### Install & offline — no native app needed
 
-Multimeter·Live is a **Progressive Web App**: in a supporting browser you can
-**install** it (address-bar install icon) to launch it in its own window like a
-native app. After your first visit it also works **fully offline** — handy on a
-bench or in the field with no Wi-Fi, since the meter connects over USB and nothing
-in the app needs the network.
+Multimeter·Live is a **Progressive Web App (PWA)**, so there is **nothing to
+download and no platform-specific build** — no `.exe`, no `.dmg`, no app store.
+The web app *is* the app. In a supporting browser you can **install** it (the
+address-bar install icon) to launch it in its own window, with its own icon, just
+like a native desktop program.
+
+After your first visit it also works **fully offline** — handy on a bench or in
+the field with no Wi-Fi, since the meter connects over USB and nothing in the app
+needs the network. The same install runs on Windows, macOS, Linux, and ChromeOS;
+the browser handles the packaging, so there are no separate binaries to maintain
+or trust.
 
 When a new version is published, the app doesn't reload on its own (that would
 interrupt a recording). Instead it shows a small **"A new version is available —
