@@ -9,16 +9,24 @@ import { Controls } from '@/components/Controls';
 import { Sidebar, type NavId } from '@/components/Sidebar';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { DataLog, type LoggedRow } from '@/components/DataLog';
+import { Settings } from '@/components/Settings';
+import { NoDataWarning } from '@/components/NoDataWarning';
 import { normalizeReading, readingResolution, resolutionDecimals, type Reading } from '@/lib/parser';
 import { useSerial, type SerialStatus } from '@/lib/useSerial';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '@/lib/settings';
+import { createBeeper, type Beeper } from '@/lib/beep';
 // App version — single source of truth is package.json "version". Bump it on every
 // change (see AGENTS.md "Versioning") so the footer reflects what's deployed.
 import { version as APP_VERSION } from '@/package.json';
 
 const MAX_CHART_POINTS = 3600;
-// Trigger auto-stop releases at RELEASE_RATIO × threshold (hysteresis dead-band)
-// so a signal hovering at the threshold doesn't flap logging on and off.
-const RELEASE_RATIO = 0.9;
+// Connected-but-silent threshold: if the port is connected but no reading has arrived
+// for this long, the no-data warning condition is active (the ZT703s streams
+// continuously, so 3 s of silence is clearly abnormal — meter off / lead broken).
+const NO_DATA_MS = 3000;
+// Trigger auto-stop releases at threshold × (1 − hysteresisPct/100) — a dead-band so a
+// signal hovering at the threshold doesn't flap logging on and off. The percent is a
+// user setting (see lib/settings.ts); the default 10 reproduces the old 0.9 factor.
 // Stable-only logging: after a settled value is logged, the next stable value is
 // logged only once it differs from the last logged value by at least this
 // fraction (50%). This ignores small drift (e.g. ±1 LSD) and captures only major
@@ -60,6 +68,21 @@ export default function Home() {
   const [triggerArmed, setTriggerArmed] = useState(false);
   const [triggerThreshold, setTriggerThreshold] = useState('');
   const [stableOnly, setStableOnly] = useState(false);
+  // User settings (persisted to localStorage). Initialized to defaults so the static
+  // export's pre-rendered HTML matches the first client render; a mount effect then
+  // hydrates from storage (see below) to avoid a hydration mismatch.
+  const [stabilityCount, setStabilityCount] = useState(DEFAULT_SETTINGS.stabilityCount);
+  const [hysteresisPct, setHysteresisPct] = useState(DEFAULT_SETTINGS.hysteresisPct);
+  const [preserveOnModeChange, setPreserveOnModeChange] = useState(DEFAULT_SETTINGS.preserveOnModeChange);
+  const [noDataWarning, setNoDataWarning] = useState(DEFAULT_SETTINGS.noDataWarning);
+  const [noDataAudio, setNoDataAudio] = useState(DEFAULT_SETTINGS.noDataAudio);
+  // No-data warning runtime state: `noData` = the connected-but-silent condition is
+  // active; `noDataDismissed` = the user clicked OK for the current outage. Re-armed
+  // (dismissed → false) whenever the condition clears. `lastDataAtRef` is the timestamp
+  // of the last reading, updated in handleReadings (the detector's clock).
+  const [noData, setNoData] = useState(false);
+  const [noDataDismissed, setNoDataDismissed] = useState(false);
+  const lastDataAtRef = useRef(0);
   // Mirror of recordedResolutionRef for render (histogram bin width + stat decimals);
   // the ref is the loop-side source, this state is its render-safe copy per batch.
   const [recordedResolution, setRecordedResolution] = useState<number | null>(null);
@@ -91,10 +114,17 @@ export default function Home() {
   // Whether the current session was auto-started by the trigger (scopes auto-stop).
   const triggerStartedRef = useRef(false);
   const stableOnlyRef = useRef(stableOnly);
+  // Settings mirrors read synchronously inside the async read loop (hot path).
+  const stabilityCountRef = useRef(stabilityCount);
+  const hysteresisPctRef = useRef(hysteresisPct);
+  const preserveOnModeChangeRef = useRef(preserveOnModeChange);
   // Stable-only tracking (read synchronously in the read loop): the previous
-  // numeric reading's raw value (for exact stability detection), and the last
-  // logged base value (the reference for the major-change gate + dedup guard).
+  // numeric reading's raw value (for exact stability detection), the length of the
+  // current run of consecutive equal raw values (current reading included — a value
+  // is stable once this reaches stabilityCount), and the last logged base value (the
+  // reference for the major-change gate + dedup guard).
   const prevValueRef = useRef<number | null>(null);
+  const stableRunRef = useRef(0);
   const lastLoggedValueRef = useRef<number | null>(null);
   // Coarsest LSD (resolution) among readings actually logged to the chart — the
   // basis for histogram bin width AND statistics decimals, so both reflect the
@@ -112,8 +142,8 @@ export default function Home() {
     recordingRef.current = v;
     // A stop (manual or disconnect) ends any trigger-started session.
     if (!v) triggerStartedRef.current = false;
-    // A fresh start must not inherit a stale predecessor from before it began.
-    if (v) { prevValueRef.current = null; lastLoggedValueRef.current = null; }
+    // A fresh start must not inherit a stale predecessor/run from before it began.
+    if (v) { prevValueRef.current = null; stableRunRef.current = 0; lastLoggedValueRef.current = null; }
     setRecording(v);
   }, []);
 
@@ -122,13 +152,41 @@ export default function Home() {
   useEffect(() => { triggerArmedRef.current = triggerArmed; }, [triggerArmed]);
   useEffect(() => { triggerThresholdRef.current = toFinite(triggerThreshold); }, [triggerThreshold]);
   useEffect(() => { stableOnlyRef.current = stableOnly; }, [stableOnly]);
+  useEffect(() => { stabilityCountRef.current = stabilityCount; }, [stabilityCount]);
+  useEffect(() => { hysteresisPctRef.current = hysteresisPct; }, [hysteresisPct]);
+  useEffect(() => { preserveOnModeChangeRef.current = preserveOnModeChange; }, [preserveOnModeChange]);
 
-  const flushSession = useCallback(() => {
-    recordedRowsRef.current = [];
-    rowIdRef.current = 0;
-    setRecordedRows([]);
+  // Hydrate settings from localStorage once on mount (client-only — keeps the
+  // pre-rendered defaults stable through hydration, then applies stored values).
+  // setState-in-effect is intentional and the standard pattern here: the first render
+  // must use defaults to match the static-export HTML; this runs once and can't cascade.
+  useEffect(() => {
+    const s = loadSettings();
+    /* eslint-disable react-hooks/set-state-in-effect -- intentional one-shot hydration */
+    setStabilityCount(s.stabilityCount);
+    setHysteresisPct(s.hysteresisPct);
+    setPreserveOnModeChange(s.preserveOnModeChange);
+    setNoDataWarning(s.noDataWarning);
+    setNoDataAudio(s.noDataAudio);
+    /* eslint-enable react-hooks/set-state-in-effect */
+  }, []);
+
+  // Persist on change. Skip the first invocation (mount, still defaults) so we don't
+  // clobber stored values before the hydration effect above has applied them.
+  const persistReadyRef = useRef(false);
+  useEffect(() => {
+    if (!persistReadyRef.current) { persistReadyRef.current = true; return; }
+    saveSettings({ stabilityCount, hysteresisPct, preserveOnModeChange, noDataWarning, noDataAudio });
+  }, [stabilityCount, hysteresisPct, preserveOnModeChange, noDataWarning, noDataAudio]);
+
+  // Reset only the single-unit projections of the log — chart, statistics, histogram
+  // derivation, and the stable-run tracking — while LEAVING the canonical recorded
+  // rows intact. Used by the "keep log on mode change" path: those views can't mix
+  // units, but the per-row table/CSV (each row carries its own mode/unit) can.
+  const resetSessionDerived = useCallback(() => {
     statsRef.current = { count: 0, mean: 0, m2: 0, min: Infinity, max: -Infinity };
     prevValueRef.current = null;
+    stableRunRef.current = 0;
     lastLoggedValueRef.current = null;
     recordedResolutionRef.current = null;
     rawCountsRef.current = new Map();
@@ -140,8 +198,18 @@ export default function Home() {
     setDominantValue(null);
   }, []);
 
+  // Full session flush: clear the canonical recorded rows AND every derived projection.
+  const flushSession = useCallback(() => {
+    recordedRowsRef.current = [];
+    rowIdRef.current = 0;
+    setRecordedRows([]);
+    resetSessionDerived();
+  }, [resetSessionDerived]);
+
   const handleReadings = useCallback(
     (readings: Reading[]) => {
+      // Mark data as flowing — resets the no-data detector's silence clock.
+      lastDataAtRef.current = Date.now();
       setCurrent(readings[readings.length - 1]);
 
       // Range and trigger bounds are constant for the whole batch — resolve once.
@@ -149,7 +217,7 @@ export default function Home() {
       const rMax = autoScaleRef.current ? null : toFinite(rangeMax);
       let armed = triggerArmedRef.current;
       let threshold = triggerThresholdRef.current;
-      let release = threshold !== null ? threshold * RELEASE_RATIO : null;
+      let release = threshold !== null ? threshold * (1 - hysteresisPctRef.current / 100) : null;
 
       let recordingChanged = false;
       const newPoints: ChartPoint[] = [];
@@ -162,7 +230,17 @@ export default function Home() {
           modeRef.current = r.mode;
           unitRef.current = baseUnit;
           setChartUnit(baseUnit);
-          flushSession();
+          // Keep the recorded log across a real mode change if the user opted in (the
+          // chart/stats/derivation are single-unit and always reset). The very first
+          // detection has no prior data, so a full flush is equivalent there. The
+          // batch's chart points are always discarded; its old-unit rows are kept only
+          // when preserving (they remain valid logged data in their original unit).
+          if (wasInitialised && preserveOnModeChangeRef.current) {
+            resetSessionDerived();
+          } else {
+            flushSession();
+            newRows.length = 0;
+          }
           newPoints.length = 0;
           // A real mode/unit change makes the in-progress data and threshold
           // meaningless in the new unit — stop logging, then reset the trigger
@@ -204,16 +282,23 @@ export default function Home() {
             // OL is excluded from the filtered dataset entirely (table, CSV, chart,
             // and stats). It is still a discontinuity — reset the run and reference.
             prevValueRef.current = null;
+            stableRunRef.current = 0;
             lastLoggedValueRef.current = null;
           } else {
+            // Maintain the run of consecutive equal raw values (current included): a
+            // value is stable once the run reaches the configured stabilityCount.
+            stableRunRef.current =
+              prevValueRef.current !== null && r.value === prevValueRef.current
+                ? stableRunRef.current + 1
+                : 1;
             // With the stable filter on, log a value once it is confirmed stable
-            // (equals its predecessor) AND it differs from the last logged value
-            // by a major amount — so small drift around a settled reading and the
-            // rest of a plateau are suppressed. (Ratio is scale-invariant, so the
-            // narrowed baseValue is used; raw r.value drives exact stability.)
+            // (a run of >= stabilityCount equal readings) AND it differs from the last
+            // logged value by a major amount — so small drift around a settled reading
+            // and the rest of a plateau are suppressed. (Ratio is scale-invariant, so
+            // the narrowed baseValue is used; raw r.value drives the run count.)
             let logSample = true;
             if (stableFilter) {
-              const stable = prevValueRef.current !== null && r.value === prevValueRef.current;
+              const stable = stableRunRef.current >= stabilityCountRef.current;
               const last = lastLoggedValueRef.current;
               const major =
                 last === null ||
@@ -295,7 +380,7 @@ export default function Home() {
       setRecordedResolution(recordedResolutionRef.current);
       setDominantValue(dominantValueRef.current);
     },
-    [flushSession, rangeMin, rangeMax],
+    [flushSession, resetSessionDerived, rangeMin, rangeMax],
   );
 
   const { status, error, connect, disconnect } = useSerial(handleReadings);
@@ -304,6 +389,52 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional: reset recording on disconnect
     if (status !== 'connected') setRec(false);
   }, [status, setRec]);
+
+  // No-data detector: while connected, poll whether the silence since the last reading
+  // has exceeded NO_DATA_MS. The clock is seeded on connect (so a meter that never sends
+  // any data is caught too) and reset by handleReadings on each batch. Inactive whenever
+  // the port isn't connected.
+  useEffect(() => {
+    if (status !== 'connected') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear condition when not connected
+      setNoData(false);
+      return;
+    }
+    lastDataAtRef.current = Date.now();
+    const id = setInterval(() => {
+      setNoData(Date.now() - lastDataAtRef.current > NO_DATA_MS);
+    }, 750);
+    return () => clearInterval(id);
+  }, [status]);
+
+  // Re-arm per outage: once the condition clears (data resumed or disconnected), drop
+  // any prior dismissal so the next silence shows the warning again.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- re-arm dismissal on clear
+    if (!noData) setNoDataDismissed(false);
+  }, [noData]);
+
+  // Single source of truth for both the overlay and the audio: the warning is visible
+  // only while enabled, the condition holds, and it hasn't been dismissed this outage.
+  const overlayVisible = noDataWarning && noData && !noDataDismissed;
+
+  // One beeper for the component's life; created client-side, disposed on unmount.
+  const beeperRef = useRef<Beeper | null>(null);
+  useEffect(() => {
+    beeperRef.current = createBeeper();
+    return () => {
+      beeperRef.current?.dispose();
+      beeperRef.current = null;
+    };
+  }, []);
+  // Drive the audio from the same visibility flag, gated by the audio setting — so it
+  // can never sound without the overlay and stops on dismiss / data-resume / disconnect.
+  useEffect(() => {
+    const beeper = beeperRef.current;
+    if (!beeper) return;
+    if (overlayVisible && noDataAudio) beeper.start();
+    else beeper.stop();
+  }, [overlayVisible, noDataAudio]);
 
   const handleConnect = useCallback(() => connect(baud), [connect, baud]);
   const handleToggleRecord = useCallback(() => {
@@ -460,7 +591,7 @@ export default function Home() {
               canExport={canExport}
             />
           </>
-        ) : (
+        ) : view === 'data-log' ? (
           <DataLog
             reading={current}
             recording={recording}
@@ -474,6 +605,19 @@ export default function Home() {
             onClear={flushSession}
             onNoteChange={handleNoteChange}
           />
+        ) : (
+          <Settings
+            stabilityCount={stabilityCount}
+            onStabilityCountChange={setStabilityCount}
+            hysteresisPct={hysteresisPct}
+            onHysteresisPctChange={setHysteresisPct}
+            preserveOnModeChange={preserveOnModeChange}
+            onPreserveOnModeChangeChange={setPreserveOnModeChange}
+            noDataWarning={noDataWarning}
+            onNoDataWarningChange={setNoDataWarning}
+            noDataAudio={noDataAudio}
+            onNoDataAudioChange={setNoDataAudio}
+          />
         )}
       </div>
 
@@ -483,6 +627,9 @@ export default function Home() {
           Multimeter Visualizer v{APP_VERSION} &nbsp;·&nbsp; Built for precision.
         </p>
       </footer>
+
+      {/* Connected-but-no-data warning — overlays every view; informational only. */}
+      {overlayVisible && <NoDataWarning onDismiss={() => setNoDataDismissed(true)} />}
     </div>
   );
 }
