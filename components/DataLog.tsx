@@ -66,9 +66,14 @@ export function DataLog({
     });
   }, [rows, query]);
 
-  // Render only the most recent MAX_RENDERED rows (newest are appended last).
+  // Render only the most recent MAX_RENDERED rows (newest are appended last), then
+  // show them newest-first: the latest measurement on top, oldest at the bottom.
+  // Take the window from the tail BEFORE reversing, and reverse a copy so `filtered`
+  // (which may alias the `rows` prop) is never mutated — the underlying dataset, the
+  // chart, stats, and CSV stay in chronological order.
   const truncated = filtered.length > MAX_RENDERED;
-  const visible = truncated ? filtered.slice(filtered.length - MAX_RENDERED) : filtered;
+  const windowed = truncated ? filtered.slice(filtered.length - MAX_RENDERED) : filtered;
+  const visible = windowed.slice().reverse();
 
   return (
     <>
