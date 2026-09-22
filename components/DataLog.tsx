@@ -3,7 +3,7 @@
 import { memo, useMemo, useState } from 'react';
 import { Search, Download, Square, Play, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
-import { MODE_LABELS, type Reading } from '@/lib/parser';
+import { MODE_LABELS, type Reading, displayUnit } from '@/lib/parser';
 import { StatisticsPanel, type SessionStats } from '@/components/StatisticsPanel';
 import { ActionButton } from '@/components/Controls';
 
@@ -47,7 +47,7 @@ export function DataLog({
 }) {
   const [query, setQuery] = useState('');
   const liveValue = reading?.display ?? '—';
-  const liveUnit = reading?.unit ?? '';
+  const liveUnit = displayUnit(reading?.unit ?? '');
   const liveMode = reading ? MODE_LABELS[reading.mode] : 'No signal';
 
   // Display-only filter: never mutates the dataset or the statistics.
@@ -60,7 +60,10 @@ export function DataLog({
         iso.toLowerCase().includes(q) ||
         r.mode.toLowerCase().includes(q) ||
         value.toLowerCase().includes(q) ||
+        // Match either spelling: the operator may type "om" (what the meter sends and
+        // what the CSV holds) or paste the symbol shown in the table.
         r.unit.toLowerCase().includes(q) ||
+        displayUnit(r.unit).toLowerCase().includes(q) ||
         note.toLowerCase().includes(q)
       );
     });
@@ -233,7 +236,7 @@ const Row = memo(function Row({
       <div className="py-3 text-right font-mono text-sm font-semibold tabular-nums text-fg">
         {r.display}
       </div>
-      <div className="py-3 pl-5 font-mono text-xs text-muted">{r.unit}</div>
+      <div className="py-3 pl-5 font-mono text-xs text-muted">{displayUnit(r.unit)}</div>
       <div className="py-2 pr-3">
         <input
           value={note}

@@ -28,10 +28,13 @@ export const MODE_LABELS: Record<Mode, string> = {
 export interface Reading {
   mode: Mode;
   raw: string; // original token + body, kept for debugging
-  value: number | null; // null = Out-of-Limit (OL) or no reading
-  display: string; // what the digital readout shows: "00.145", "-0.0004", "OL"
+  value: number | null; // null = Out-of-Limit (OL) or not-yet-measured
+  display: string; // what the digital readout shows: "00.145", "-0.0004", "OL", "---"
   unit: string; // 'V','mV','A','mA','OM','KOM','MOM','nF', '' if none
   isOverload: boolean;
+  // Mid-measurement: the meter sends dashes ("-.--") — digit-free but no 'L'. A charging
+  // capacitor reads this, so it never reports a wrong intermediate NUMBER. value === null.
+  isMeasuring: boolean;
   ts: number; // Date.now() when parsed
 }
 
@@ -49,8 +52,12 @@ const TOKEN_LIST = Object.keys(TOKENS);
 const MAX_TOKEN_LEN = Math.max(...TOKEN_LIST.map((t) => t.length));
 const MAX_BUFFER = 4096; // safety net against unbounded growth on junk input
 
-// Units ordered longest-first so "mV" is not read as "V", "MOM"/"KOM" not "OM".
-const UNIT_RE = /(MOM|KOM|mV|mA|nF|OM|V|A)\s*$/;
+// Longest-first so "mV" is not read as "V", "MOM"/"KOM" not "OM". An unrecognized unit
+// parses to unit='' which skips page.tsx's mode/unit-change guard entirely — the reading
+// is then recorded at the PREVIOUS unit's scale with nothing looking wrong. All three
+// micro spellings ('u', U+00B5, U+03BC) are listed: what the ZT703s sends above nF is
+// unconfirmed, and an extra entry costs nothing.
+const UNIT_RE = /(MOM|KOM|mV|mA|pF|nF|uF|\u00B5F|\u03BCF|mF|OM|V|A)\s*$/;
 const RE_OVERLOAD = /L/i;
 const RE_DIGIT = /[0-9]/;
 const RE_NON_NUM = /[^0-9.+-]/g;
@@ -65,8 +72,32 @@ const SCALE: Record<string, { base: string; factor: number }> = {
   OM: { base: 'OM', factor: 1 },
   KOM: { base: 'OM', factor: 1e3 },
   MOM: { base: 'OM', factor: 1e6 },
+  // Capacitance is based on nF (not F) — changing that base would re-scale the chart,
+  // statistics, histogram binning and readingResolution for every capacitance session.
+  pF: { base: 'nF', factor: 1e-3 },
   nF: { base: 'nF', factor: 1 },
+  uF: { base: 'nF', factor: 1e3 },
+  '\u00B5F': { base: 'nF', factor: 1e3 },
+  '\u03BCF': { base: 'nF', factor: 1e3 },
+  mF: { base: 'nF', factor: 1e6 },
 };
+
+// The meter spells ohms in ASCII — `OM`/`KOM`/`MOM` — because its protocol has no room
+// for a symbol. That is a WIRE spelling, not something to show an operator: Pass/Fail's
+// entry units already render `Ω` (ENTRY_UNITS), so leaving the readout as `OM` made one
+// app disagree with itself about what unit a resistance is in.
+//
+// Display-only. `Reading.unit` keeps the raw token, and so does the CSV export — the wire
+// spelling is the stable one for data interchange, and every capture rule and the SCALE
+// table above key off it.
+const DISPLAY_UNITS: Record<string, string> = {
+  OM: '\u03A9',   // Ω
+  KOM: 'k\u03A9', // kΩ
+  MOM: 'M\u03A9', // MΩ
+};
+
+/** The operator-facing spelling of a raw meter unit. Unmapped units pass through. */
+export const displayUnit = (unit: string): string => DISPLAY_UNITS[unit] ?? unit;
 
 interface FoundToken {
   index: number;
@@ -98,18 +129,21 @@ export function parseMeasurement(mode: Mode, token: string, body: string): Readi
   const isOverload = RE_OVERLOAD.test(numPart);
   const hasDigit = RE_DIGIT.test(numPart);
 
+  // Digit-free without an 'L' = the meter's "measuring, not ready" dashes.
+  const isMeasuring = !isOverload && !hasDigit;
+
   let value: number | null;
   let display: string;
   if (isOverload || !hasDigit) {
     value = null;
-    display = 'OL';
+    display = isMeasuring ? '---' : 'OL';
   } else {
     const n = Number.parseFloat(numPart.replace(RE_NON_NUM, ''));
     value = Number.isFinite(n) ? n : null;
     display = numPart; // preserve the meter's formatting, e.g. "00.145"
   }
 
-  return { mode, raw: token + body, value, display, unit, isOverload, ts: Date.now() };
+  return { mode, raw: token + body, value, display, unit, isOverload, isMeasuring, ts: Date.now() };
 }
 
 /** Project a Reading onto its canonical base unit for charting. */
@@ -132,17 +166,32 @@ export function resolutionDecimals(width: number): number {
 }
 
 /**
- * Least-significant-digit step of a reading, projected onto its base unit.
- * Derived from the decimal places of the meter's `display` string (same basis as
- * the readout's resolution) times the unit's base-scale factor, so it lines up
- * with the normalized `baseValue` used for charting.
- * e.g. "09.977" KOM -> 0.001 kΩ × 1e3 = 1 Ω. Returns null for OL / no unit.
+ * Least-significant-digit step of a reading, in its base unit: decimals of the meter's
+ * `display` × the unit's scale factor, so it lines up with `baseValue`.
+ * e.g. "09.977" KOM -> 0.001 kΩ × 1e3 = 1 Ω. Null for OL / no unit.
  */
 export function readingResolution(r: Reading): number | null {
   if (!r.unit || r.value === null) return null;
   const lsdDisplay = Math.pow(10, -displayDecimals(r.display));
   const factor = SCALE[r.unit]?.factor ?? 1;
   return lsdDisplay * factor;
+}
+
+/**
+ * Band half-width, in least-significant digits, within which a reading still counts as
+ * the same measurement. Exact equality never builds a run — the last digit dithers, and
+ * the ZT703s specs 20 counts of noise on the nF range, so 1-2 LSD left a held part
+ * flickering PASS -> Settling -> PASS. A real transient (probe lift) moves 10^3-10^4 LSD,
+ * so widening is nearly free. Retune here; the Pass/Fail raw-stream panel prints `lsd`.
+ */
+export const STABLE_LSD_TOLERANCE = 20;
+
+/** Whether `value` belongs to the run anchored at `anchor` (both base-unit; `lsd` from
+ *  `readingResolution`). Falls back to exact equality when the resolution is unknown. */
+export function withinStableBand(value: number, anchor: number, lsd: number | null): boolean {
+  if (lsd === null) return value === anchor;
+  // Tiny relative slack: the band edge is reached by float arithmetic on scaled units.
+  return Math.abs(value - anchor) <= lsd * STABLE_LSD_TOLERANCE * (1 + 1e-9);
 }
 
 export interface StreamParser {

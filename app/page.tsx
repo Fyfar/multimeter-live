@@ -6,12 +6,21 @@ import { clsx } from 'clsx';
 import { DigitalDisplay } from '@/components/DigitalDisplay';
 import { RealtimeChart, type ChartPoint, type TimeRange } from '@/components/RealtimeChart';
 import { Controls } from '@/components/Controls';
-import { Sidebar, type NavId } from '@/components/Sidebar';
+import { Sidebar, NAV_IDS, type NavId } from '@/components/Sidebar';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { DataLog, type LoggedRow } from '@/components/DataLog';
 import { Settings } from '@/components/Settings';
 import { NoDataWarning } from '@/components/NoDataWarning';
-import { normalizeReading, readingResolution, resolutionDecimals, type Reading } from '@/lib/parser';
+import { PassFail } from '@/components/PassFail';
+import {
+  displayUnit, normalizeReading, readingResolution, resolutionDecimals, withinStableBand,
+  type Reading,
+} from '@/lib/parser';
+import {
+  ENTRY_UNITS, entryToBase, formatEntryValue, isSupportedMode, judge, parseSiValue,
+  resolveAbsoluteTolerance, resolveBand,
+  type ToleranceMode, type VerdictRow,
+} from '@/lib/passfail';
 import { useSerial, type SerialStatus } from '@/lib/useSerial';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '@/lib/settings';
 import { createBeeper, type Beeper } from '@/lib/beep';
@@ -24,15 +33,35 @@ const MAX_CHART_POINTS = 3600;
 // for this long, the no-data warning condition is active (the ZT703s streams
 // continuously, so 3 s of silence is clearly abnormal — meter off / lead broken).
 const NO_DATA_MS = 3000;
-// Trigger auto-stop releases at threshold × (1 − hysteresisPct/100) — a dead-band so a
-// signal hovering at the threshold doesn't flap logging on and off. The percent is a
-// user setting (see lib/settings.ts); the default 10 reproduces the old 0.9 factor.
-// Stable-only logging: after a settled value is logged, the next stable value is
-// logged only once it differs from the last logged value by at least this
-// fraction (50%). This ignores small drift (e.g. ±1 LSD) and captures only major
-// changes. NOTE: a relative gate is very sensitive near zero (0.0001→0.0002 is
-// +100%); add an absolute floor here if that proves noisy in practice.
+// Stable-only logging: once a settled value is logged, the next is logged only if it
+// differs by >= this fraction — ignores ±1 LSD drift. NOTE: relative, so very sensitive
+// near zero (0.0001 -> 0.0002 is +100%); add an absolute floor if that proves noisy.
 const MAJOR_CHANGE_RATIO = 0.5;
+// Shared by both capture sites. The `v !== last` clause only matters when last === 0,
+// which is reachable on the Data Log path (a genuine logged 0) but not on the Pass/Fail
+// one (zero is intercepted as "no part") — keep it, it is load-bearing for one caller.
+const csvEsc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+
+const downloadCsv = (lines: string[], name: string) => {
+  const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const isMajorChange = (v: number, last: number | null): boolean =>
+  last === null || (v !== last && Math.abs(v - last) >= MAJOR_CHANGE_RATIO * Math.abs(last));
+// Pass/Fail verdict tones. Far apart in pitch AND length so they're told apart by ear
+// alone — the operator is looking at the parts, not the screen.
+const PASS_TONE = { hz: 1180, ms: 90 };
+const FAIL_TONE = { hz: 300, ms: 280 };
+// How many recent distinct raw packets the debug panel keeps.
+const DEBUG_RAW_MAX = 14;
+// Quiet period before a Pass/Fail entry is final. Typing "10" passes through "1", and
+// judging that intermediate flashes FAIL at 1% on the way to 10%.
+const PF_INPUT_DEBOUNCE_MS = 350;
 
 const toFinite = (s: string): number | null => {
   if (s === '') return null;
@@ -55,31 +84,55 @@ const STATUS_DOT: Record<SerialStatus, string> = {
 };
 
 export default function Home() {
-  const [baud, setBaud] = useState(115200);
+  const [baud, setBaud] = useState(DEFAULT_SETTINGS.baud);
+  // The active view. Stays 'dashboard' for the first render so it matches the statically
+  // exported HTML; the URL hash takes over in the mount effect below.
   const [view, setView] = useState<NavId>('dashboard');
   const [current, setCurrent] = useState<Reading | null>(null);
+  // Whether `current` has been confirmed stable. The read loop owns the run counter in
+  // a ref; this is its render-visible mirror, committed once per batch. Pass/Fail needs
+  // it because a resistance reading sweeps through intermediate values as the probe is
+  // lifted, and comparing those produces a spurious FAIL.
+  const [currentStable, setCurrentStable] = useState(false);
   const [recording, setRecording] = useState(false);
   const [chartPoints, setChartPoints] = useState<ChartPoint[]>([]);
   const [chartUnit, setChartUnit] = useState('');
-  const [rangeMin, setRangeMin] = useState('');
-  const [rangeMax, setRangeMax] = useState('');
-  const [autoScale, setAutoScale] = useState(true);
-  const [timeRange, setTimeRange] = useState<TimeRange>('10s');
+  const [rangeMin, setRangeMin] = useState(DEFAULT_SETTINGS.rangeMin);
+  const [rangeMax, setRangeMax] = useState(DEFAULT_SETTINGS.rangeMax);
+  const [autoScale, setAutoScale] = useState(DEFAULT_SETTINGS.autoScale);
+  const [timeRange, setTimeRange] = useState<TimeRange>(DEFAULT_SETTINGS.timeRange);
   const [triggerArmed, setTriggerArmed] = useState(false);
   const [triggerThreshold, setTriggerThreshold] = useState('');
-  const [stableOnly, setStableOnly] = useState(false);
-  // User settings (persisted to localStorage). Initialized to defaults so the static
-  // export's pre-rendered HTML matches the first client render; a mount effect then
-  // hydrates from storage (see below) to avoid a hydration mismatch.
+  const [stableOnly, setStableOnly] = useState(DEFAULT_SETTINGS.stableOnly);
+  // Persisted settings. Start at defaults so the static-export HTML matches the first
+  // client render; a mount effect then hydrates from storage.
   const [stabilityCount, setStabilityCount] = useState(DEFAULT_SETTINGS.stabilityCount);
   const [hysteresisPct, setHysteresisPct] = useState(DEFAULT_SETTINGS.hysteresisPct);
   const [preserveOnModeChange, setPreserveOnModeChange] = useState(DEFAULT_SETTINGS.preserveOnModeChange);
   const [noDataWarning, setNoDataWarning] = useState(DEFAULT_SETTINGS.noDataWarning);
   const [noDataAudio, setNoDataAudio] = useState(DEFAULT_SETTINGS.noDataAudio);
-  // No-data warning runtime state: `noData` = the connected-but-silent condition is
-  // active; `noDataDismissed` = the user clicked OK for the current outage. Re-armed
-  // (dismissed → false) whenever the condition clears. `lastDataAtRef` is the timestamp
-  // of the last reading, updated in handleReadings (the detector's clock).
+  const [capNoPartFloor, setCapNoPartFloor] = useState(DEFAULT_SETTINGS.capNoPartFloor);
+  const [verdictAudio, setVerdictAudio] = useState(DEFAULT_SETTINGS.verdictAudio);
+  // Pass/Fail entry, held as the operator's raw strings so SI forms survive typing
+  // (`4.5k` must not be mangled on its way through `4.`). Parsed on demand.
+  const [pfReference, setPfReference] = useState('');
+  const [pfTolerance, setPfTolerance] = useState('');
+  const [pfToleranceMode, setPfToleranceMode] = useState<ToleranceMode>('percent');
+  // Debounced mirrors of the two entry fields. The inputs stay live; everything
+  // downstream (echo, band, live verdict, capture) reads these, so a half-typed value is
+  // never judged. Cleared synchronously on a mode change.
+  const [pfReferenceSettled, setPfReferenceSettled] = useState('');
+  const [pfToleranceSettled, setPfToleranceSettled] = useState('');
+  // Captured verdicts for the current batch. Separate from `recordedRows`: the two
+  // have different lifecycles and clear independently.
+  // Debug: ring of the most recent DISTINCT raw packets — the meter repeats itself many
+  // times a second, and the transitions are what matter when diagnosing.
+  const [debugRaw, setDebugRaw] = useState<string[]>([]);
+  const [passFailRows, setPassFailRows] = useState<VerdictRow[]>([]);
+  const passFailRowsRef = useRef<VerdictRow[]>([]);
+  const pfRowIdRef = useRef(0);
+  // No-data warning: `noData` = connected-but-silent; `noDataDismissed` = OK'd for the
+  // current outage (re-armed when it clears). `lastDataAtRef` is the detector's clock.
   const [noData, setNoData] = useState(false);
   const [noDataDismissed, setNoDataDismissed] = useState(false);
   const lastDataAtRef = useRef(0);
@@ -90,11 +143,9 @@ export default function Home() {
   // brief outlier (short/disconnect) doesn't pull the window off the main reading.
   const [dominantValue, setDominantValue] = useState<number | null>(null);
 
-  // Canonical filtered dataset: the single source of truth for the Data Log table
-  // and CSV export. The chart buffer and stats accumulator are projections fed from
-  // the same log site (see handleReadings). OL is never added here. `recordedRowsRef`
-  // mirrors the state for the stable `exportCsv` callback; `rowIdRef` is the monotonic
-  // id source (stable React key + per-row note target).
+  // Canonical filtered dataset: single source of truth for the Data Log table and CSV.
+  // Chart buffer and stats are projections fed from the same log site. OL is never added.
+  // The ref mirrors it so exportCsv stays a stable callback.
   const [recordedRows, setRecordedRows] = useState<LoggedRow[]>([]);
   const recordedRowsRef = useRef<LoggedRow[]>([]);
   const rowIdRef = useRef(0);
@@ -118,22 +169,36 @@ export default function Home() {
   const stabilityCountRef = useRef(stabilityCount);
   const hysteresisPctRef = useRef(hysteresisPct);
   const preserveOnModeChangeRef = useRef(preserveOnModeChange);
-  // Stable-only tracking (read synchronously in the read loop): the previous
-  // numeric reading's raw value (for exact stability detection), the length of the
-  // current run of consecutive equal raw values (current reading included — a value
-  // is stable once this reaches stabilityCount), and the last logged base value (the
-  // reference for the major-change gate + dedup guard).
-  const prevValueRef = useRef<number | null>(null);
+  // Capacitance-only mirrors, read synchronously in the read loop.
+  const capNoPartFloorRef = useRef(capNoPartFloor);
+  // Pass/Fail config mirrors, in ENTRY units (converted per-sample with the reading's
+  // own mode, so a mid-batch mode change can't apply the wrong factor).
+  const pfRefEntryRef = useRef<number | null>(null);
+  const pfBandEntryRef = useRef<number | null>(null);
+  const pfToleranceModeRef = useRef<ToleranceMode>(pfToleranceMode);
+  const pfToleranceValueRef = useRef<number | null>(null);
+  // "Already captured this part" latch for the Pass/Fail store. Separate from
+  // `lastLoggedValueRef` because the two stores clear independently; both are cleared
+  // by the same discontinuity (OL / capacitance no-part).
+  const pfLastCapturedRef = useRef<number | null>(null);
+  const verdictAudioRef = useRef(verdictAudio);
+  // One beeper for the component's life; created client-side, disposed on unmount.
+  // Declared here rather than beside its effect because handleReadings (defined below)
+  // sounds verdict tones through it.
+  const beeperRef = useRef<Beeper | null>(null);
+  // Base-unit value anchoring the current run. A reading joins the run while it stays
+  // within STABLE_LSD_TOLERANCE of this; anything further starts a new run anchored at
+  // itself. Anchored rather than compared to the immediately previous reading, so a
+  // slow ramp cannot creep along one LSD at a time and look settled forever.
+  const runAnchorRef = useRef<number | null>(null);
   const stableRunRef = useRef(0);
   const lastLoggedValueRef = useRef<number | null>(null);
-  // Coarsest LSD (resolution) among readings actually logged to the chart — the
-  // basis for histogram bin width AND statistics decimals, so both reflect the
-  // stored data (not the live reading, which can auto-range to a finer step).
-  // Frozen while logging is stopped. Reset with the session in flushSession.
+  // Coarsest LSD among LOGGED readings — the basis for histogram bin width AND stat
+  // decimals, so both reflect stored data, not the live (possibly auto-ranged) reading.
+  // Frozen while logging is stopped; reset in flushSession.
   const recordedResolutionRef = useRef<number | null>(null);
-  // Raw reading time spent at each LSD-snapped value while recording → the
-  // dominant (most-held) value, used to center the histogram window. Bounded by
-  // distinct values seen; reset with the session. dominantCountRef = running max.
+  // Reading count per LSD-snapped value -> the dominant (most-held) value, which centers
+  // the histogram window so a brief outlier can't pull it off.
   const rawCountsRef = useRef<Map<number, number>>(new Map());
   const dominantValueRef = useRef<number | null>(null);
   const dominantCountRef = useRef(0);
@@ -143,7 +208,7 @@ export default function Home() {
     // A stop (manual or disconnect) ends any trigger-started session.
     if (!v) triggerStartedRef.current = false;
     // A fresh start must not inherit a stale predecessor/run from before it began.
-    if (v) { prevValueRef.current = null; stableRunRef.current = 0; lastLoggedValueRef.current = null; }
+    if (v) { runAnchorRef.current = null; stableRunRef.current = 0; lastLoggedValueRef.current = null; }
     setRecording(v);
   }, []);
 
@@ -155,11 +220,36 @@ export default function Home() {
   useEffect(() => { stabilityCountRef.current = stabilityCount; }, [stabilityCount]);
   useEffect(() => { hysteresisPctRef.current = hysteresisPct; }, [hysteresisPct]);
   useEffect(() => { preserveOnModeChangeRef.current = preserveOnModeChange; }, [preserveOnModeChange]);
+  useEffect(() => { capNoPartFloorRef.current = capNoPartFloor; }, [capNoPartFloor]);
+  useEffect(() => { verdictAudioRef.current = verdictAudio; }, [verdictAudio]);
+  useEffect(() => { pfToleranceModeRef.current = pfToleranceMode; }, [pfToleranceMode]);
+  // Debounce each field independently. The cleanup cancels the pending commit on every
+  // keystroke, so the value lands only once typing pauses.
+  useEffect(() => {
+    const id = setTimeout(() => setPfReferenceSettled(pfReference), PF_INPUT_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [pfReference]);
+  useEffect(() => {
+    const id = setTimeout(() => setPfToleranceSettled(pfTolerance), PF_INPUT_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [pfTolerance]);
 
-  // Hydrate settings from localStorage once on mount (client-only — keeps the
-  // pre-rendered defaults stable through hydration, then applies stored values).
-  // setState-in-effect is intentional and the standard pattern here: the first render
-  // must use defaults to match the static-export HTML; this runs once and can't cascade.
+  useEffect(() => {
+    // Reads the SETTLED values, never the raw inputs. An absolute tolerance is read in
+    // the reference's own SI range (see resolveAbsoluteTolerance); percent is unitless.
+    const ref = parseSiValue(pfReferenceSettled);
+    const tol =
+      pfToleranceMode === 'absolute'
+        ? resolveAbsoluteTolerance(pfToleranceSettled, ref)
+        : parseSiValue(pfToleranceSettled);
+    pfRefEntryRef.current = ref;
+    pfToleranceValueRef.current = tol;
+    pfBandEntryRef.current =
+      ref !== null && tol !== null ? resolveBand(ref, tol, pfToleranceMode) : null;
+  }, [pfReferenceSettled, pfToleranceSettled, pfToleranceMode]);
+
+  // One-shot hydration from localStorage. setState-in-effect is intentional: the first
+  // render must use defaults to match the static-export HTML.
   useEffect(() => {
     const s = loadSettings();
     /* eslint-disable react-hooks/set-state-in-effect -- intentional one-shot hydration */
@@ -168,6 +258,16 @@ export default function Home() {
     setPreserveOnModeChange(s.preserveOnModeChange);
     setNoDataWarning(s.noDataWarning);
     setNoDataAudio(s.noDataAudio);
+    setCapNoPartFloor(s.capNoPartFloor);
+    setVerdictAudio(s.verdictAudio);
+    // Presentation + connection preferences. Restoring these is deliberately inert: none
+    // of them starts logging, arms the trigger, or opens a port.
+    setBaud(s.baud);
+    setTimeRange(s.timeRange);
+    setAutoScale(s.autoScale);
+    setRangeMin(s.rangeMin);
+    setRangeMax(s.rangeMax);
+    setStableOnly(s.stableOnly);
     /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
@@ -176,16 +276,72 @@ export default function Home() {
   const persistReadyRef = useRef(false);
   useEffect(() => {
     if (!persistReadyRef.current) { persistReadyRef.current = true; return; }
-    saveSettings({ stabilityCount, hysteresisPct, preserveOnModeChange, noDataWarning, noDataAudio });
-  }, [stabilityCount, hysteresisPct, preserveOnModeChange, noDataWarning, noDataAudio]);
+    saveSettings({
+      stabilityCount, hysteresisPct, preserveOnModeChange, noDataWarning, noDataAudio,
+      capNoPartFloor, verdictAudio,
+      baud, timeRange, autoScale, rangeMin, rangeMax, stableOnly,
+    });
+  }, [
+    stabilityCount, hysteresisPct, preserveOnModeChange, noDataWarning, noDataAudio,
+    capNoPartFloor, verdictAudio,
+    baud, timeRange, autoScale, rangeMin, rangeMax, stableOnly,
+  ]);
 
-  // Reset only the single-unit projections of the log — chart, statistics, histogram
-  // derivation, and the stable-run tracking — while LEAVING the canonical recorded
-  // rows intact. Used by the "keep log on mode change" path: those views can't mix
-  // units, but the per-row table/CSV (each row carries its own mode/unit) can.
+  // The URL hash is the source of truth for the active view: it survives a reload, gives
+  // browser Back/Forward between views for free, and makes a view deep-linkable. Read only
+  // after mount — this page is statically exported and prerendered, so `location` does not
+  // exist at render time and reading it there would desync hydration.
+  useEffect(() => {
+    const fromHash = (): NavId => {
+      const id = window.location.hash.slice(1);
+      return (NAV_IDS as readonly string[]).includes(id) ? (id as NavId) : 'dashboard';
+    };
+    /* eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot hydration from the URL */
+    setView(fromHash());
+    // Back/Forward across pushState entries fires popstate; an edited address bar fires
+    // hashchange. Both resolve through the same validated read, so handling them twice is
+    // harmless and missing either is not.
+    const sync = () => setView(fromHash());
+    window.addEventListener('hashchange', sync);
+    window.addEventListener('popstate', sync);
+    return () => {
+      window.removeEventListener('hashchange', sync);
+      window.removeEventListener('popstate', sync);
+    };
+  }, []);
+
+  // Guard an unload that would discard the session. Registered ONLY while there is
+  // something to lose: a permanently-registered beforeunload handler is a signal to the
+  // browser in its own right (bfcache eligibility, PWA install heuristics), so an idle app
+  // must not carry one. This also covers the service worker's Reload button, which goes
+  // through window.location.reload() and is this app's most likely cause of session loss.
+  const hasRows = recordedRows.length > 0 || passFailRows.length > 0;
+  useEffect(() => {
+    if (!hasRows) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = ''; // older browsers still gate the dialog on this
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [hasRows]);
+
+  // Navigation is presentational only: it never touches logging, the trigger, or the port.
+  // pushState (not location.hash =) so each view becomes its own history entry AND no
+  // hashchange event fires — the listener above is left for Back/Forward and manual edits.
+  const navigate = useCallback((id: NavId) => {
+    setView(id);
+    if (window.location.hash.slice(1) !== id) {
+      window.history.pushState(null, '', `#${id}`);
+    }
+  }, []);
+
+  // Reset the single-unit projections (chart, stats, histogram derivation, stable run)
+  // while KEEPING the canonical rows — the "keep log on mode change" path. Those views
+  // can't mix units; the per-row table/CSV can (each row carries its own mode/unit).
   const resetSessionDerived = useCallback(() => {
     statsRef.current = { count: 0, mean: 0, m2: 0, min: Infinity, max: -Infinity };
-    prevValueRef.current = null;
+    runAnchorRef.current = null;
     stableRunRef.current = 0;
     lastLoggedValueRef.current = null;
     recordedResolutionRef.current = null;
@@ -212,6 +368,19 @@ export default function Home() {
       lastDataAtRef.current = Date.now();
       setCurrent(readings[readings.length - 1]);
 
+      // Debug ring: append this batch's raw packets, collapsing consecutive repeats.
+      setDebugRaw((prev) => {
+        let next = prev;
+        for (const r of readings) {
+          const line = r.raw.trim();
+          // Returning `prev` unchanged when the batch was all repeats (the normal case)
+          // lets React bail out instead of re-rendering for a panel that is collapsed
+          // by default and lives in one of four views.
+          if (next[next.length - 1] !== line) next = [...next, line].slice(-DEBUG_RAW_MAX);
+        }
+        return next;
+      });
+
       // Range and trigger bounds are constant for the whole batch — resolve once.
       const rMin = autoScaleRef.current ? null : toFinite(rangeMin);
       const rMax = autoScaleRef.current ? null : toFinite(rangeMax);
@@ -222,20 +391,21 @@ export default function Home() {
       let recordingChanged = false;
       const newPoints: ChartPoint[] = [];
       const newRows: LoggedRow[] = [];
+      const newVerdicts: VerdictRow[] = [];
       for (const r of readings) {
         const { baseValue, baseUnit } = normalizeReading(r);
 
         if (baseUnit !== '' && (modeRef.current !== r.mode || unitRef.current !== baseUnit)) {
-          const wasInitialised = modeRef.current !== null;
+          const wasInitialized = modeRef.current !== null;
           modeRef.current = r.mode;
           unitRef.current = baseUnit;
-          setChartUnit(baseUnit);
-          // Keep the recorded log across a real mode change if the user opted in (the
-          // chart/stats/derivation are single-unit and always reset). The very first
-          // detection has no prior data, so a full flush is equivalent there. The
-          // batch's chart points are always discarded; its old-unit rows are kept only
-          // when preserving (they remain valid logged data in their original unit).
-          if (wasInitialised && preserveOnModeChangeRef.current) {
+          // Display-only conversion: chartUnit feeds the chart axis, statistics, trigger
+          // label and log summary, and nothing else. The raw token stays on the Reading.
+          setChartUnit(displayUnit(baseUnit));
+          // Keep the recorded log across a real mode change if opted in (chart/stats are
+          // single-unit and always reset). The first detection has no prior data, so a
+          // full flush is equivalent. Old-unit rows stay valid in their original unit.
+          if (wasInitialized && preserveOnModeChangeRef.current) {
             resetSessionDerived();
           } else {
             flushSession();
@@ -246,7 +416,7 @@ export default function Home() {
           // meaningless in the new unit — stop logging, then reset the trigger
           // (clear threshold + disarm). (Skip on the first reading, which is
           // initial detection, not a change, so a pre-typed threshold survives.)
-          if (wasInitialised) {
+          if (wasInitialized) {
             if (recordingRef.current) {
               recordingRef.current = false;
               recordingChanged = true;
@@ -259,6 +429,21 @@ export default function Home() {
             release = null;
             setTriggerThreshold('');
             setTriggerArmed(false);
+            // The reference and every captured verdict belong to the old mode's unit —
+            // neither is meaningful in the new one. Cleared for the same reason the
+            // trigger threshold is.
+            pfRefEntryRef.current = null;
+            pfBandEntryRef.current = null;
+            pfToleranceValueRef.current = null;
+            pfLastCapturedRef.current = null;
+            passFailRowsRef.current = [];
+            pfRowIdRef.current = 0;
+            newVerdicts.length = 0;
+            setPfReference('');
+            setPfTolerance('');
+            setPfReferenceSettled('');
+            setPfToleranceSettled('');
+            setPassFailRows([]);
           }
         }
 
@@ -276,44 +461,104 @@ export default function Home() {
           recordingChanged = true;
         }
 
-        if (recordingRef.current) {
-          const stableFilter = stableOnlyRef.current;
-          if (baseValue === null) {
-            // OL is excluded from the filtered dataset entirely (table, CSV, chart,
-            // and stats). It is still a discontinuity — reset the run and reference.
-            prevValueRef.current = null;
-            stableRunRef.current = 0;
-            lastLoggedValueRef.current = null;
+        // Capacitance has no OL on lifted probes — it reads lead stray capacitance (pF),
+        // which is numeric, so without this it appends a junk near-zero row on every probe
+        // lift and never clears the last-logged reference. A floor of 0 disables it.
+        const noPart =
+          baseValue !== null &&
+          r.mode === 'CAPACITANCE' &&
+          Math.abs(baseValue) < capNoPartFloorRef.current;
+
+        // Stable-run tracking runs regardless of the recording session, because Pass/Fail
+        // capture has no session of its own (its batch boundary is Clear). Behavior-
+        // preserving for the Data Log: every path that STARTS recording resets these refs
+        // first, so anything accumulated while idle is wiped when recording begins.
+        if (baseValue === null || noPart) {
+          // OL (and a capacitance no-part reading) are excluded from the filtered
+          // dataset entirely — table, CSV, chart, and stats. Both are still a
+          // discontinuity — reset the run and BOTH stores' last-captured references.
+          runAnchorRef.current = null;
+          stableRunRef.current = 0;
+          lastLoggedValueRef.current = null;
+          pfLastCapturedRef.current = null;
+        } else {
+          // Maintain the run of consecutive readings belonging to the same measurement.
+          // Membership is a band around the run's anchor, not equality
+          // (see STABLE_LSD_TOLERANCE in lib/parser.ts).
+          const lsd = readingResolution(r);
+          const anchor = runAnchorRef.current;
+          if (anchor !== null && withinStableBand(baseValue, anchor, lsd)) {
+            stableRunRef.current += 1;
           } else {
-            // Maintain the run of consecutive equal raw values (current included): a
-            // value is stable once the run reaches the configured stabilityCount.
-            stableRunRef.current =
-              prevValueRef.current !== null && r.value === prevValueRef.current
-                ? stableRunRef.current + 1
-                : 1;
-            // With the stable filter on, log a value once it is confirmed stable
-            // (a run of >= stabilityCount equal readings) AND it differs from the last
-            // logged value by a major amount — so small drift around a settled reading
-            // and the rest of a plateau are suppressed. (Ratio is scale-invariant, so
-            // the narrowed baseValue is used; raw r.value drives the run count.)
+            stableRunRef.current = 1;
+            runAnchorRef.current = baseValue;
+          }
+          // Capacitance needs no extra count: the meter sends "-.--" (isMeasuring) until
+          // it has a number — confirmed on a 3.3 mF electrolytic — so its first digit
+          // value is already settled.
+          const stable = stableRunRef.current >= stabilityCountRef.current;
+
+          // ---- Pass/Fail capture (independent of the recording session) ----------
+          // An exact zero means nothing is connected, not a part measuring zero: with the
+          // probes floating the meter settles on 0 in every supported mode, and a real
+          // component never reads a clean 0 (a 0R link still shows lead resistance).
+          // Scoped to Pass/Fail — the Data Log records a genuine 0 as a real measurement.
+          const pfRefEntry = pfRefEntryRef.current;
+          const pfBandEntry = pfBandEntryRef.current;
+          if (baseValue === 0) {
+            pfLastCapturedRef.current = null;
+          } else if (
+            stable &&
+            pfRefEntry !== null &&
+            pfBandEntry !== null &&
+            isSupportedMode(r.mode) &&
+            // Guards a stale reference being judged in the wrong unit: the mode-change
+            // reset is gated on `baseUnit !== ''`, so an unrecognized unit string
+            // (documented as possible above nF) skips it and leaves the old reference
+            // live while r.mode has already changed.
+            baseUnit === ENTRY_UNITS[r.mode].baseUnit
+          ) {
+            const last = pfLastCapturedRef.current;
+            // Gated on the stable run, same flag the live verdict uses (via currentStable),
+            // so display and table never disagree. Resistance and diode need it: with no
+            // "measuring" state, lifting a probe sweeps UP through intermediates and a
+            // >50% step would read as a fresh part. The major-change gate suppresses drift
+            // within one held part; a probe lift clears the reference for the next.
+            if (isMajorChange(baseValue, last)) {
+              pfLastCapturedRef.current = baseValue;
+              const toBase = ENTRY_UNITS[r.mode].toBase;
+              const baseReference = entryToBase(r.mode, pfRefEntry);
+              const baseBand = pfBandEntry * toBase;
+              newVerdicts.push({
+                id: pfRowIdRef.current++,
+                ts: r.ts,
+                iso: new Date(r.ts).toISOString(),
+                mode: r.mode,
+                baseValue,
+                baseReference,
+                baseBand,
+                toleranceMode: pfToleranceModeRef.current,
+                toleranceValue: pfToleranceValueRef.current!,
+                verdict: judge(baseValue, baseReference, baseBand),
+                deviation: baseValue - baseReference,
+              });
+            }
+          }
+
+          // ---- Data Log / chart / statistics (gated on the recording session) -----
+          if (recordingRef.current) {
+            // Stable filter on: log only a confirmed-stable value that differs from the
+            // last logged one by a major amount, suppressing drift and plateaus.
             let logSample = true;
-            if (stableFilter) {
-              const stable = stableRunRef.current >= stabilityCountRef.current;
-              const last = lastLoggedValueRef.current;
-              const major =
-                last === null ||
-                (baseValue !== last && Math.abs(baseValue - last) >= MAJOR_CHANGE_RATIO * Math.abs(last));
-              logSample = stable && major;
+            if (stableOnlyRef.current) {
+              logSample = stable && isMajorChange(baseValue, lastLoggedValueRef.current);
               if (logSample) lastLoggedValueRef.current = baseValue;
             }
-            prevValueRef.current = r.value;
 
-            // Count time at this value (LSD-snapped) to find the dominant value
-            // for the histogram window center. Counts every reading, not just
-            // logged ones, so a held value wins over a brief outlier.
-            const res = readingResolution(r);
-            if (res !== null) {
-              const k = Math.round(baseValue / res) * res;
+            // Time at this LSD-snapped value -> the dominant value that centers the
+            // histogram. Counts every reading, so a held value beats a brief outlier.
+            if (lsd !== null) {
+              const k = Math.round(baseValue / lsd) * lsd;
               const c = (rawCountsRef.current.get(k) ?? 0) + 1;
               rawCountsRef.current.set(k, c);
               if (c > dominantCountRef.current) {
@@ -323,15 +568,13 @@ export default function Home() {
             }
 
             if (logSample) {
-              // Append to the canonical filtered dataset (one entry per logged
-              // sample). The chart point + Welford update below are projections of
-              // this same entry, fed in the same iteration → identical membership.
-              // `iso` is precomputed once here (reused by render, filter, and CSV).
+              // Chart point + Welford update below are projections of this same entry, fed
+              // in the same iteration -> identical membership. `iso` precomputed once.
               newRows.push({ id: rowIdRef.current++, reading: r, note: '', iso: new Date(r.ts).toISOString() });
               // Track the coarsest LSD among logged readings → bin width + stat
               // decimals reflect the recorded data, range-robust to auto-ranging.
-              if (res !== null) {
-                recordedResolutionRef.current = Math.max(recordedResolutionRef.current ?? 0, res);
+              if (lsd !== null) {
+                recordedResolutionRef.current = Math.max(recordedResolutionRef.current ?? 0, lsd);
               }
               const s = statsRef.current;
               s.count += 1;
@@ -348,6 +591,8 @@ export default function Home() {
               newPoints.push({ ts: r.ts, v: chartV, oor });
             }
           }
+
+
         }
       }
 
@@ -362,18 +607,33 @@ export default function Home() {
         });
       }
 
-      // Append this batch's logged entries to the canonical store once (batched, not
-      // per-sample). The ref is updated synchronously so exportCsv reads the latest;
-      // setState uses the same new reference to trigger a render.
+      // Batched append, ref updated synchronously so exportCsv reads the latest.
       if (newRows.length > 0) {
         recordedRowsRef.current = [...recordedRowsRef.current, ...newRows];
         setRecordedRows(recordedRowsRef.current);
       }
 
+      // Same batched append for the Pass/Fail store.
+      if (newVerdicts.length > 0) {
+        passFailRowsRef.current = [...passFailRowsRef.current, ...newVerdicts];
+        setPassFailRows(passFailRowsRef.current);
+        // One tone per batch (its last verdict) — a batch spans ms, a part takes seconds.
+        if (verdictAudioRef.current) {
+          const t = newVerdicts[newVerdicts.length - 1].verdict === 'PASS' ? PASS_TONE : FAIL_TONE;
+          beeperRef.current?.beep(t.hz, t.ms);
+        }
+      }
+
+      // Mirror the run state for render. After the loop the ref describes the LAST
+      // reading of the batch, which is the one `current` holds.
+      setCurrentStable(stableRunRef.current >= stabilityCountRef.current);
+
       // Commit a trigger-driven recording transition once (no per-sample setState).
       if (recordingChanged) setRecording(recordingRef.current);
 
-      if (recordingRef.current) setSessionStats({ ...statsRef.current });
+      // Only when something was actually logged: statsRef mutates inside `if (logSample)`,
+      // so with the stable filter on most batches change nothing.
+      if (newRows.length > 0) setSessionStats({ ...statsRef.current });
 
       // Mirror the recorded resolution + dominant value to state. (Unchanged when
       // nothing was logged this batch — e.g. logging stopped → React bails out.)
@@ -390,10 +650,8 @@ export default function Home() {
     if (status !== 'connected') setRec(false);
   }, [status, setRec]);
 
-  // No-data detector: while connected, poll whether the silence since the last reading
-  // has exceeded NO_DATA_MS. The clock is seeded on connect (so a meter that never sends
-  // any data is caught too) and reset by handleReadings on each batch. Inactive whenever
-  // the port isn't connected.
+  // No-data detector: while connected, poll for silence past NO_DATA_MS. Clock seeded on
+  // connect (catches a meter that never sends anything) and reset per batch.
   useEffect(() => {
     if (status !== 'connected') {
       // eslint-disable-next-line react-hooks/set-state-in-effect -- clear condition when not connected
@@ -418,8 +676,6 @@ export default function Home() {
   // only while enabled, the condition holds, and it hasn't been dismissed this outage.
   const overlayVisible = noDataWarning && noData && !noDataDismissed;
 
-  // One beeper for the component's life; created client-side, disposed on unmount.
-  const beeperRef = useRef<Beeper | null>(null);
   useEffect(() => {
     beeperRef.current = createBeeper();
     return () => {
@@ -435,6 +691,15 @@ export default function Home() {
     if (overlayVisible && noDataAudio) beeper.start();
     else beeper.stop();
   }, [overlayVisible, noDataAudio]);
+
+  // Clears only the verdict batch — the Data Log's recorded rows are untouched, and
+  // the reference/tolerance are kept (the operator is usually still on the same part).
+  const clearPassFail = useCallback(() => {
+    passFailRowsRef.current = [];
+    pfRowIdRef.current = 0;
+    pfLastCapturedRef.current = null;
+    setPassFailRows([]);
+  }, []);
 
   const handleConnect = useCallback(() => connect(baud), [connect, baud]);
   const handleToggleRecord = useCallback(() => {
@@ -456,32 +721,46 @@ export default function Home() {
     setRecordedRows(next);
   }, []);
 
+  // Serializes the same canonical store the Data Log renders. Numeric only (OL is
+  // excluded upstream), so r.value is always present.
   const exportCsv = useCallback(() => {
-    // Serializes the same canonical store the table renders. recordedRows is numeric
-    // only (OL is excluded upstream), so r.value is always present.
-    // Quote/escape note fields (free text may contain commas, quotes, newlines).
-    const esc = (s: string) => (/[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s);
-    const lines: string[] = ['Timestamp,Mode,Value,Unit,Notes'];
+    const lines = ['Timestamp,Mode,Value,Unit,Notes'];
     for (const { iso, reading: r, note } of recordedRowsRef.current) {
-      lines.push([iso, r.mode, String(r.value), r.unit, esc(note)].join(','));
+      lines.push([iso, r.mode, String(r.value), r.unit, csvEsc(note)].join(','));
     }
-    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `multimeter-${Date.now()}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadCsv(lines, `multimeter-${Date.now()}.csv`);
   }, []);
+
+  // Numbers in the mode's ENTRY unit (ohms/volts/farads) with the unit in its own
+  // column, so the file holds plain numbers rather than SI-prefixed strings.
+  const exportVerdictCsv = useCallback(() => {
+    const lines = ['Timestamp,Mode,Measured,Unit,Reference,Tolerance,Deviation,Verdict'];
+    for (const row of passFailRowsRef.current) {
+      const { label, toBase } = ENTRY_UNITS[row.mode];
+      const tol =
+        row.toleranceMode === 'percent'
+          ? `${row.toleranceValue}%`
+          : `\u00B1${formatEntryValue(row.toleranceValue, label)}`;
+      lines.push([
+        row.iso, row.mode, String(row.baseValue / toBase), label,
+        String(row.baseReference / toBase), csvEsc(tol),
+        String(row.deviation / toBase), row.verdict,
+      ].join(','));
+    }
+    downloadCsv(lines, `multimeter-passfail-${Date.now()}.csv`);
+  }, []);
+
+  // The Pass/Fail view's active mode: the live reading's mode when supported, else null
+  // (which renders the unsupported-mode explanation).
+  const passFailMode = current && isSupportedMode(current.mode) ? current.mode : null;
 
   const recordedCount = sessionStats?.count ?? 0;
   const canExport = recordedRows.length > 0;
   const effectiveYMin = autoScale ? undefined : (toFinite(rangeMin) ?? undefined);
   const effectiveYMax = autoScale ? undefined : (toFinite(rangeMax) ?? undefined);
-  // Histogram bin width + statistics decimals. When data is present they are a
-  // property of the recorded data, so use the frozen coarsest recorded resolution —
-  // this keeps both stable when logging is stopped and the live value changes scale
-  // or goes OL. When empty, derive from the live reading to preview the window.
+  // Histogram bin width + stat decimals. With data present, use the frozen coarsest
+  // recorded resolution so both stay stable when logging stops and the live value
+  // auto-ranges or goes OL; when empty, derive from the live reading as a preview.
   const liveNumeric = current && normalizeReading(current).baseValue !== null ? current : null;
   const binWidth =
     chartPoints.length > 0
@@ -540,7 +819,7 @@ export default function Home() {
           onDisconnect={disconnect}
           error={error}
           active={view}
-          onNavChange={setView}
+          onNavChange={navigate}
         />
 
         {view === 'dashboard' ? (
@@ -579,7 +858,7 @@ export default function Home() {
               onTriggerThresholdChange={setTriggerThreshold}
               triggerArmed={triggerArmed}
               onTriggerArmedChange={setTriggerArmed}
-              canArm={toFinite(triggerThreshold) !== null && status === 'connected'}
+              canArm={(toFinite(triggerThreshold) ?? 0) > 0 && status === 'connected'}
               triggerUnit={chartUnit}
               recording={recording}
               onToggleRecord={handleToggleRecord}
@@ -605,6 +884,25 @@ export default function Home() {
             onClear={flushSession}
             onNoteChange={handleNoteChange}
           />
+        ) : view === 'pass-fail' ? (
+          <PassFail
+            reading={current}
+            stable={currentStable}
+            mode={passFailMode}
+            reference={pfReference}
+            onReferenceChange={setPfReference}
+            referenceSettled={pfReferenceSettled}
+            tolerance={pfTolerance}
+            onToleranceChange={setPfTolerance}
+            toleranceSettled={pfToleranceSettled}
+            toleranceMode={pfToleranceMode}
+            onToleranceModeChange={setPfToleranceMode}
+            rows={passFailRows}
+            onClear={clearPassFail}
+            onExportCsv={exportVerdictCsv}
+            debugRaw={debugRaw}
+            onClearDebug={() => setDebugRaw([])}
+          />
         ) : (
           <Settings
             stabilityCount={stabilityCount}
@@ -617,6 +915,10 @@ export default function Home() {
             onNoDataWarningChange={setNoDataWarning}
             noDataAudio={noDataAudio}
             onNoDataAudioChange={setNoDataAudio}
+            capNoPartFloor={capNoPartFloor}
+            onCapNoPartFloorChange={setCapNoPartFloor}
+            verdictAudio={verdictAudio}
+            onVerdictAudioChange={setVerdictAudio}
           />
         )}
       </div>
