@@ -6,6 +6,11 @@
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
+    // Permits the `./x.ts` specifiers the scripts/check-*.ts self-checks need in order
+    // to be runnable directly by node (ESM requires a full specifier). App code keeps
+    // using the extensionless `@/*` alias; this flag only allows the form, never requires
+    // it. Valid only alongside `noEmit`, which is set above.
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "bundler",

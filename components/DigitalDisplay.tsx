@@ -1,14 +1,16 @@
 'use client';
 
-import { displayDecimals, MODE_LABELS, type Reading } from '@/lib/parser';
+import { displayDecimals, displayUnit, MODE_LABELS, type Reading } from '@/lib/parser';
 
-function calcResolution(display: string, unit: string): string {
-  if (!unit || display === 'OL') return '—';
-  const decimals = displayDecimals(display);
+// Keyed on the VALUE, not the rendered string: testing for 'OL'/'---' means a future
+// third non-numeric display silently reports a bogus resolution.
+function calcResolution(r: Reading | null): string {
+  if (!r?.unit || r.value === null) return '—';
+  const decimals = displayDecimals(r.display);
   // No fractional digits (e.g. "123" or a trailing-dot "00.") => whole-unit resolution.
-  if (decimals < 1) return `1 ${unit}`;
-  const res = `0.${'0'.repeat(decimals - 1)}1`;
-  return `${res} ${unit}`;
+  const u = displayUnit(r.unit);
+  if (decimals < 1) return `1 ${u}`;
+  return `0.${'0'.repeat(decimals - 1)}1 ${u}`;
 }
 
 export function DigitalDisplay({
@@ -21,13 +23,14 @@ export function DigitalDisplay({
   sampleCount: number;
 }) {
   const display = reading?.display ?? '- - - -';
-  const unit = reading?.unit ?? '';
+  const unit = displayUnit(reading?.unit ?? '');
   const mode = reading ? MODE_LABELS[reading.mode] : 'No signal';
-  const resolution = reading ? calcResolution(reading.display, reading.unit) : '—';
-  const isOL = display === 'OL';
+  const resolution = calcResolution(reading);
+  // Overload and "measuring" are both non-numeric: same muted styling, different text.
+  const nonNumeric = reading !== null && reading.value === null;
   const hasReading = reading !== null;
 
-  const valueColor = isOL ? 'text-muted' : recording ? 'text-amber' : 'text-accent';
+  const valueColor = nonNumeric ? 'text-muted' : recording ? 'text-amber' : 'text-accent';
 
   return (
     <section className="rounded-lg border border-border bg-panel p-5">
@@ -53,7 +56,7 @@ export function DigitalDisplay({
       <div className="flex items-end justify-center gap-4 py-5">
         <span
           className={`font-mono text-8xl font-bold leading-none tabular-nums transition-colors ${valueColor}`}
-          style={!isOL && hasReading ? { textShadow: '0 0 28px rgba(59,130,246,0.35)' } : undefined}
+          style={!nonNumeric && hasReading ? { textShadow: '0 0 28px rgba(59,130,246,0.35)' } : undefined}
         >
           {display}
         </span>

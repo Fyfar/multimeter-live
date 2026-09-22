@@ -1,21 +1,26 @@
 'use client';
 
-import { FileText, LayoutDashboard, LogOut, Settings } from 'lucide-react';
+import { CheckCircle2, FileText, LayoutDashboard, LogOut, Settings } from 'lucide-react';
 import { clsx } from 'clsx';
 import type { SerialStatus } from '@/lib/useSerial';
+import { BAUD_RATES } from '@/lib/settings';
 
-const BAUD_RATES = [9600, 19200, 38400, 57600, 115200];
 
-export type NavId = 'dashboard' | 'data-log' | 'settings';
+export type NavId = 'dashboard' | 'data-log' | 'pass-fail' | 'settings';
+// Exported so app/page.tsx can validate a URL hash against the real set of views rather
+// than trusting whatever the address bar contains.
+export const NAV_IDS = ['dashboard', 'data-log', 'pass-fail', 'settings'] as const;
 const NAV_ITEMS: { id: NavId; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'data-log', label: 'Data Log' },
+  { id: 'pass-fail', label: 'Pass/Fail' },
   { id: 'settings', label: 'Settings' },
 ];
 
 const NAV_ICONS: Record<NavId, React.ReactNode> = {
   dashboard: <LayoutDashboard size={15} />,
   'data-log': <FileText size={15} />,
+  'pass-fail': <CheckCircle2 size={15} />,
   settings: <Settings size={15} />,
 };
 

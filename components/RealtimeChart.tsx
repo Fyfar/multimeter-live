@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Info } from 'lucide-react';
+import { TIME_RANGES, type TimeRange } from '@/lib/settings';
 import {
   Chart,
   CategoryScale,
@@ -39,7 +40,10 @@ export interface ChartPoint {
   oor?: boolean; // out-of-range: outside user-defined min/max
 }
 
-export type TimeRange = '10s' | '1m' | '10m' | '1h' | 'all';
+// The valid list lives in lib/settings.ts (it is persisted and validated there, and that
+// module must stay importable by the Node check script). Re-exported here so every existing
+// `import { type TimeRange } from '@/components/RealtimeChart'` keeps working.
+export type { TimeRange };
 
 const TIME_RANGE_MS: Record<TimeRange, number> = {
   '10s': 10_000,
@@ -50,7 +54,7 @@ const TIME_RANGE_MS: Record<TimeRange, number> = {
   all: Infinity,
 };
 
-const TIME_RANGE_LABELS: TimeRange[] = ['10s', '1m', '10m', '1h', 'all'];
+const TIME_RANGE_LABELS: readonly TimeRange[] = TIME_RANGES;
 
 export type ChartType = 'line' | 'histogram';
 
