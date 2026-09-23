@@ -8,7 +8,7 @@ import { RealtimeChart, type ChartPoint, type TimeRange } from '@/components/Rea
 import { Controls } from '@/components/Controls';
 import { Sidebar, NAV_IDS, type NavId } from '@/components/Sidebar';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
-import { DataLog, type LoggedRow } from '@/components/DataLog';
+import { DataLog, rowIso, type LoggedRow } from '@/components/DataLog';
 import { Settings } from '@/components/Settings';
 import { NoDataWarning } from '@/components/NoDataWarning';
 import { PassFail } from '@/components/PassFail';
@@ -22,13 +22,15 @@ import {
   type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
 import { useSerial, type SerialStatus } from '@/lib/useSerial';
-import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '@/lib/settings';
+import {
+  BUFFER_RETENTION_MS, DEFAULT_SETTINGS, firstIndexInWindow, loadSettings, saveSettings,
+} from '@/lib/settings';
 import { createBeeper, type Beeper } from '@/lib/beep';
+import { csvBlob, csvEsc } from '@/lib/csv';
 // App version — single source of truth is package.json "version". Bump it on every
 // change (see AGENTS.md "Versioning") so the footer reflects what's deployed.
 import { version as APP_VERSION } from '@/package.json';
 
-const MAX_CHART_POINTS = 3600;
 // Connected-but-silent threshold: if the port is connected but no reading has arrived
 // for this long, the no-data warning condition is active (the ZT703s streams
 // continuously, so 3 s of silence is clearly abnormal — meter off / lead broken).
@@ -37,13 +39,8 @@ const NO_DATA_MS = 3000;
 // differs by >= this fraction — ignores ±1 LSD drift. NOTE: relative, so very sensitive
 // near zero (0.0001 -> 0.0002 is +100%); add an absolute floor if that proves noisy.
 const MAJOR_CHANGE_RATIO = 0.5;
-// Shared by both capture sites. The `v !== last` clause only matters when last === 0,
-// which is reachable on the Data Log path (a genuine logged 0) but not on the Pass/Fail
-// one (zero is intercepted as "no part") — keep it, it is load-bearing for one caller.
-const csvEsc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
-
-const downloadCsv = (lines: string[], name: string) => {
-  const url = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' }));
+const downloadCsv = (blob: Blob, name: string) => {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = name;
@@ -51,14 +48,15 @@ const downloadCsv = (lines: string[], name: string) => {
   URL.revokeObjectURL(url);
 };
 
+// Shared by both capture sites. The `v !== last` clause only matters when last === 0,
+// which is reachable on the Data Log path (a genuine logged 0) but not on the Pass/Fail
+// one (zero is intercepted as "no part") — keep it, it is load-bearing for one caller.
 const isMajorChange = (v: number, last: number | null): boolean =>
   last === null || (v !== last && Math.abs(v - last) >= MAJOR_CHANGE_RATIO * Math.abs(last));
 // Pass/Fail verdict tones. Far apart in pitch AND length so they're told apart by ear
 // alone — the operator is looking at the parts, not the screen.
 const PASS_TONE = { hz: 1180, ms: 90 };
 const FAIL_TONE = { hz: 300, ms: 280 };
-// How many recent distinct raw packets the debug panel keeps.
-const DEBUG_RAW_MAX = 14;
 // Quiet period before a Pass/Fail entry is final. Typing "10" passes through "1", and
 // judging that intermediate flashes FAIL at 1% on the way to 10%.
 const PF_INPUT_DEBOUNCE_MS = 350;
@@ -96,6 +94,13 @@ export default function Home() {
   const [currentStable, setCurrentStable] = useState(false);
   const [recording, setRecording] = useState(false);
   const [chartPoints, setChartPoints] = useState<ChartPoint[]>([]);
+  // When the current session's first point arrived. The chart anchors its x-axis here
+  // while the session is younger than the selected window. Deliberately NOT derived from
+  // chartPoints[0]: the buffer is trimmed, so its oldest point is a fact about retention,
+  // not about the session. Today retention covers the longest window and the two would
+  // agree — which is exactly why deriving it would be a trap, since shortening retention
+  // later would silently break the anchor instead of failing loudly.
+  const [sessionStart, setSessionStart] = useState<number | null>(null);
   const [chartUnit, setChartUnit] = useState('');
   const [rangeMin, setRangeMin] = useState(DEFAULT_SETTINGS.rangeMin);
   const [rangeMax, setRangeMax] = useState(DEFAULT_SETTINGS.rangeMax);
@@ -125,9 +130,6 @@ export default function Home() {
   const [pfToleranceSettled, setPfToleranceSettled] = useState('');
   // Captured verdicts for the current batch. Separate from `recordedRows`: the two
   // have different lifecycles and clear independently.
-  // Debug: ring of the most recent DISTINCT raw packets — the meter repeats itself many
-  // times a second, and the transitions are what matter when diagnosing.
-  const [debugRaw, setDebugRaw] = useState<string[]>([]);
   const [passFailRows, setPassFailRows] = useState<VerdictRow[]>([]);
   const passFailRowsRef = useRef<VerdictRow[]>([]);
   const pfRowIdRef = useRef(0);
@@ -350,6 +352,7 @@ export default function Home() {
     dominantCountRef.current = 0;
     setSessionStats(null);
     setChartPoints([]);
+    setSessionStart(null);
     setRecordedResolution(null);
     setDominantValue(null);
   }, []);
@@ -367,19 +370,6 @@ export default function Home() {
       // Mark data as flowing — resets the no-data detector's silence clock.
       lastDataAtRef.current = Date.now();
       setCurrent(readings[readings.length - 1]);
-
-      // Debug ring: append this batch's raw packets, collapsing consecutive repeats.
-      setDebugRaw((prev) => {
-        let next = prev;
-        for (const r of readings) {
-          const line = r.raw.trim();
-          // Returning `prev` unchanged when the batch was all repeats (the normal case)
-          // lets React bail out instead of re-rendering for a panel that is collapsed
-          // by default and lives in one of four views.
-          if (next[next.length - 1] !== line) next = [...next, line].slice(-DEBUG_RAW_MAX);
-        }
-        return next;
-      });
 
       // Range and trigger bounds are constant for the whole batch — resolve once.
       const rMin = autoScaleRef.current ? null : toFinite(rangeMin);
@@ -569,8 +559,8 @@ export default function Home() {
 
             if (logSample) {
               // Chart point + Welford update below are projections of this same entry, fed
-              // in the same iteration -> identical membership. `iso` precomputed once.
-              newRows.push({ id: rowIdRef.current++, reading: r, note: '', iso: new Date(r.ts).toISOString() });
+              // in the same iteration -> identical membership.
+              newRows.push({ id: rowIdRef.current++, reading: r, note: '' });
               // Track the coarsest LSD among logged readings → bin width + stat
               // decimals reflect the recorded data, range-robust to auto-ranging.
               if (lsd !== null) {
@@ -588,7 +578,7 @@ export default function Home() {
               let oor = false;
               if (rMax !== null && baseValue > rMax) { chartV = rMax; oor = true; }
               else if (rMin !== null && baseValue < rMin) { chartV = rMin; oor = true; }
-              newPoints.push({ ts: r.ts, v: chartV, oor });
+              newPoints.push({ x: r.ts, y: chartV, oor });
             }
           }
 
@@ -597,13 +587,30 @@ export default function Home() {
       }
 
       if (newPoints.length > 0) {
+        // Once per batch, never in the per-sample loop. Functional so it cannot race the
+        // reset above: that queues null first, so `prev` is null here and this stamps.
+        setSessionStart((prev) => prev ?? newPoints[0].x);
+        // Resolved out here, not inside the updater: React may invoke an updater twice
+        // (StrictMode), and a clock read in there would trim to two different instants.
+        const trimBefore = Date.now() - BUFFER_RETENTION_MS;
         setChartPoints((prev) => {
           const combined = [...prev, ...newPoints];
-          // 'all' mode accumulates the full session — skip the rolling cap.
+          // 'all' mode accumulates the full session — never trimmed.
+          // ponytail: unbounded, and `combined` is a full copy every batch, so both memory
+          // and per-batch work grow with session length (~86k points and an 86k-element copy
+          // 3x/second after 8 hours at this meter's rate). Deliberate: a ceiling here would
+          // reintroduce the count-vs-time confusion this trim removed, and switching to a
+          // bounded range already discards anything older than BUFFER_RETENTION_MS. The real
+          // fix is a decimated render tier plus an append that does not copy — measured and
+          // written up, not built.
           if (timeRangeRef.current === 'all') return combined;
-          return combined.length > MAX_CHART_POINTS
-            ? combined.slice(combined.length - MAX_CHART_POINTS)
-            : combined;
+          // Otherwise keep the longest bounded window, BY TIME. A sample count cannot do
+          // this job: it only covers an hour at an assumed packet rate, and the previous
+          // 3600 covered 20 minutes at this meter's 3/s, so the '1h' view was permanently
+          // missing its oldest two thirds. The buffer is in timestamp order, so the cut is
+          // a binary search and one slice.
+          const from = firstIndexInWindow(combined, trimBefore);
+          return from === 0 ? combined : combined.slice(from);
         });
       }
 
@@ -724,30 +731,35 @@ export default function Home() {
   // Serializes the same canonical store the Data Log renders. Numeric only (OL is
   // excluded upstream), so r.value is always present.
   const exportCsv = useCallback(() => {
-    const lines = ['Timestamp,Mode,Value,Unit,Notes'];
-    for (const { iso, reading: r, note } of recordedRowsRef.current) {
-      lines.push([iso, r.mode, String(r.value), r.unit, csvEsc(note)].join(','));
+    function* lines() {
+      for (const { reading: r, note } of recordedRowsRef.current) {
+        yield [rowIso(r), r.mode, String(r.value), r.unit, csvEsc(note)].join(',');
+      }
     }
-    downloadCsv(lines, `multimeter-${Date.now()}.csv`);
+    downloadCsv(csvBlob('Timestamp,Mode,Value,Unit,Notes', lines()), `multimeter-${Date.now()}.csv`);
   }, []);
 
   // Numbers in the mode's ENTRY unit (ohms/volts/farads) with the unit in its own
   // column, so the file holds plain numbers rather than SI-prefixed strings.
   const exportVerdictCsv = useCallback(() => {
-    const lines = ['Timestamp,Mode,Measured,Unit,Reference,Tolerance,Deviation,Verdict'];
-    for (const row of passFailRowsRef.current) {
-      const { label, toBase } = ENTRY_UNITS[row.mode];
-      const tol =
-        row.toleranceMode === 'percent'
-          ? `${row.toleranceValue}%`
-          : `\u00B1${formatEntryValue(row.toleranceValue, label)}`;
-      lines.push([
-        row.iso, row.mode, String(row.baseValue / toBase), label,
-        String(row.baseReference / toBase), csvEsc(tol),
-        String(row.deviation / toBase), row.verdict,
-      ].join(','));
+    function* lines() {
+      for (const row of passFailRowsRef.current) {
+        const { label, toBase } = ENTRY_UNITS[row.mode];
+        const tol =
+          row.toleranceMode === 'percent'
+            ? `${row.toleranceValue}%`
+            : `\u00B1${formatEntryValue(row.toleranceValue, label)}`;
+        yield [
+          row.iso, row.mode, String(row.baseValue / toBase), label,
+          String(row.baseReference / toBase), csvEsc(tol),
+          String(row.deviation / toBase), row.verdict,
+        ].join(',');
+      }
     }
-    downloadCsv(lines, `multimeter-passfail-${Date.now()}.csv`);
+    downloadCsv(
+      csvBlob('Timestamp,Mode,Measured,Unit,Reference,Tolerance,Deviation,Verdict', lines()),
+      `multimeter-passfail-${Date.now()}.csv`,
+    );
   }, []);
 
   // The Pass/Fail view's active mode: the live reading's mode when supported, else null
@@ -834,6 +846,7 @@ export default function Home() {
                 />
                 <RealtimeChart
                   data={chartPoints}
+                  sessionStart={sessionStart}
                   unit={chartUnit}
                   yMin={effectiveYMin}
                   yMax={effectiveYMax}
@@ -900,8 +913,6 @@ export default function Home() {
             rows={passFailRows}
             onClear={clearPassFail}
             onExportCsv={exportVerdictCsv}
-            debugRaw={debugRaw}
-            onClearDebug={() => setDebugRaw([])}
           />
         ) : (
           <Settings

@@ -16,6 +16,135 @@ export const BAUD_RATES = [9600, 19200, 38400, 57600, 115200] as const;
 export const TIME_RANGES = ['10s', '1m', '10m', '1h', 'all'] as const;
 export type TimeRange = (typeof TIME_RANGES)[number];
 
+// What each range MEANS, kept beside the list of ranges so one module owns it.
+export const TIME_RANGE_MS: Record<TimeRange, number> = {
+  '10s': 10_000,
+  '1m': 60_000,
+  '10m': 600_000,
+  '1h': 3_600_000,
+  // Infinity disables the chart's window filter so every buffered point is plotted.
+  all: Infinity,
+};
+
+// Tick spacing per range. With the x-axis pinned (see resolveTimeWindow) Chart.js would
+// otherwise place ticks on round EPOCH values, whose offsets from the present are
+// arbitrary — '-3587s' instead of '-3600s'. A fixed step makes every label a round
+// multiple of the step away from the present AND puts one label on the present itself.
+// Each divides its range into 5-6 intervals, under the chart's maxTicksLimit of 9.
+// 'all' has no fixed window, so Chart.js keeps choosing.
+export const TIME_RANGE_STEP_MS: Record<TimeRange, number | undefined> = {
+  '10s': 2_000,
+  '1m': 10_000,
+  '10m': 120_000,
+  '1h': 600_000,
+  all: undefined,
+};
+
+/** The line chart's x-axis range. Every field undefined => let the axis fit the data. */
+export type TimeWindow = { min?: number; max?: number; stepSize?: number };
+
+/**
+ * Resolve the chart's x-axis range for `range`, given when the session started and what
+ * time it is now.
+ *
+ * A bounded range spans exactly its window, so pixels-per-second is a CONSTANT and two
+ * equal durations occupy equal width. While the session is younger than the window the
+ * span is anchored at its start — the trace fills from the left and nothing already
+ * drawn moves; after that it rolls with the clock, newest at the right edge. Those are
+ * the two arms of one `max()`, so the handover is continuous: at elapsed === windowMs
+ * both arms give the same span, with no jump to hide.
+ *
+ * The anchor is the SESSION start, never the oldest buffered point. The buffer is trimmed,
+ * so its oldest point describes retention, not the session. It did once diverge outright:
+ * a 3600-sample cap held only 20 minutes at 3 samples/second, so the oldest point at '1h'
+ * was permanently newer than `now - 1h` and the window would have stayed in its filling
+ * phase forever, with a dead band on the right that never closed. Retention is stated in
+ * time now (BUFFER_RETENTION_MS) and the two agree — keep them separate anyway, so that
+ * changing retention cannot silently move the anchor.
+ *
+ * 'all' has no fixed duration to pin to, so it returns nothing set and the axis fits the
+ * data. It is the one range whose scale is not constant, which is inherent: an unbounded
+ * span in a fixed width has no constant scale.
+ */
+/**
+ * How much history the chart buffer keeps while a bounded range is active: the longest
+ * bounded window, so every bounded view is complete by construction and none can be short
+ * of data through trimming.
+ *
+ * Derived from TIME_RANGE_MS rather than written as a literal. The bug this replaces was a
+ * sample COUNT (3600) sized on an assumed ~1 sample/second; the meter delivers 3, so it
+ * retained 20 minutes and the '1h' view could never be whole. A count cannot know the packet
+ * rate. Deriving the span also means adding a range cannot desynchronize retention from what
+ * the views need — though it does make adding a long range a memory decision.
+ */
+export const BUFFER_RETENTION_MS: number = Math.max(
+  ...Object.values(TIME_RANGE_MS).filter((ms) => Number.isFinite(ms)),
+);
+
+/**
+ * Index of the first point at or after `fromX`, by binary search. The chart buffer is
+ * appended in timestamp order, so the visible window is a tail slice and finding where it
+ * starts costs O(log n) instead of a scan — and, since the buffer is already in the chart's
+ * shape, the slice IS the dataset rather than a per-sample rebuild of it.
+ *
+ * Returns `points.length` when every point is older than `fromX` (an empty window).
+ *
+ * Assumes `points` is sorted by `x`, which the chart buffer is: it is appended in arrival
+ * order. `normalized: true` and the decimation plugin already assume the same, so this is
+ * not a new requirement. Duplicate timestamps are fine and expected — a batch parsed inside
+ * one millisecond stamps several readings identically — and the first of the run is
+ * returned, which is the correct edge for trimming.
+ *
+ * A backwards clock step breaks the assumption for as long as the jump lasts. A sub-second
+ * NTP slew puts the window edge off by a sample or two. A LARGE backwards step is worse than
+ * that: the search runs on unsorted data, converges to 0, and nothing is trimmed, so the
+ * chart buffer grows unbounded until the clock catches up. It cannot throw and cannot corrupt
+ * anything — it is memory growth that self-heals.
+ */
+export function firstIndexInWindow(points: readonly { x: number }[], fromX: number): number {
+  let lo = 0;
+  let hi = points.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (points[mid].x < fromX) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Tick positions for the time axis: multiples of `step` away from `now`, clipped to
+ * [`min`, `max`].
+ *
+ * Anchored to the PRESENT, not to `min`. Chart.js generates ticks from the axis minimum,
+ * which is only aligned with the present in the rolling phase (`min === now - window`).
+ * While a young session's window is still filling, `min` is the session start — an
+ * arbitrary instant — so every label carried an arbitrary remainder and no tick landed on
+ * `now` at all, leaving the view with no `Now` marker. Generating from `now` makes the
+ * present a tick by construction in both phases.
+ */
+export function timeAxisTicks(min: number, max: number, step: number, now: number): number[] {
+  if (!(step > 0) || !Number.isFinite(min) || !Number.isFinite(max)) return [];
+  const ticks: number[] = [];
+  const first = now + Math.ceil((min - now) / step) * step;
+  for (let v = first; v <= max; v += step) ticks.push(v);
+  return ticks;
+}
+
+export function resolveTimeWindow(
+  range: TimeRange,
+  sessionStart: number | null,
+  now: number,
+): TimeWindow {
+  const windowMs = TIME_RANGE_MS[range];
+  if (!Number.isFinite(windowMs)) return {};
+  // Clamped to `now`: Date.now() can step backwards (NTP, a manual clock change), and a
+  // start in the future would put the whole window ahead of the present, showing nothing.
+  const start = Math.min(sessionStart ?? now, now);
+  const min = Math.max(start, now - windowMs);
+  return { min, max: min + windowMs, stepSize: TIME_RANGE_STEP_MS[range] };
+}
+
 export type Settings = {
   stabilityCount: number;
   hysteresisPct: number;

@@ -27,7 +27,6 @@ export const MODE_LABELS: Record<Mode, string> = {
 
 export interface Reading {
   mode: Mode;
-  raw: string; // original token + body, kept for debugging
   value: number | null; // null = Out-of-Limit (OL) or not-yet-measured
   display: string; // what the digital readout shows: "00.145", "-0.0004", "OL", "---"
   unit: string; // 'V','mV','A','mA','OM','KOM','MOM','nF', '' if none
@@ -143,7 +142,7 @@ export function parseMeasurement(mode: Mode, token: string, body: string): Readi
     display = numPart; // preserve the meter's formatting, e.g. "00.145"
   }
 
-  return { mode, raw: token + body, value, display, unit, isOverload, isMeasuring, ts: Date.now() };
+  return { mode, value, display, unit, isOverload, isMeasuring, ts: Date.now() };
 }
 
 /** Project a Reading onto its canonical base unit for charting. */
@@ -182,7 +181,9 @@ export function readingResolution(r: Reading): number | null {
  * the same measurement. Exact equality never builds a run — the last digit dithers, and
  * the ZT703s specs 20 counts of noise on the nF range, so 1-2 LSD left a held part
  * flickering PASS -> Settling -> PASS. A real transient (probe lift) moves 10^3-10^4 LSD,
- * so widening is nearly free. Retune here; the Pass/Fail raw-stream panel prints `lsd`.
+ * so widening is nearly free. Retune here — but note this is now also the chart's
+ * auto-scale y-floor (RealtimeChart), deliberately, so the app has ONE number meaning
+ * "a change smaller than this is not a measurement". Changing it moves both.
  */
 export const STABLE_LSD_TOLERANCE = 20;
 
