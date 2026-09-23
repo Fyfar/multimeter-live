@@ -2,7 +2,10 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Info } from 'lucide-react';
-import { TIME_RANGES, type TimeRange } from '@/lib/settings';
+import {
+  TIME_RANGES, TIME_RANGE_MS, firstIndexInWindow, resolveTimeWindow, timeAxisTicks,
+  type TimeRange,
+} from '@/lib/settings';
 import {
   Chart,
   CategoryScale,
@@ -17,8 +20,9 @@ import {
   Tooltip,
   Legend,
   type ChartConfiguration,
+  type Scale,
 } from 'chart.js';
-import { resolutionDecimals } from '@/lib/parser';
+import { resolutionDecimals, STABLE_LSD_TOLERANCE } from '@/lib/parser';
 
 Chart.register(
   CategoryScale,
@@ -34,25 +38,19 @@ Chart.register(
   Legend,
 );
 
+/** A buffered sample, stored in the shape Chart.js consumes so nothing has to translate
+ *  it on the way to the canvas. Named for the axes, not the domain, deliberately: this is
+ *  a chart-facing projection of a `Reading` — the canonical record is `recordedRows`. */
 export interface ChartPoint {
-  ts: number;    // Date.now() when the reading was parsed
-  v: number;     // normalized value (OL readings are skipped, never charted)
-  oor?: boolean; // out-of-range: outside user-defined min/max
+  x: number;     // Date.now() when the reading was parsed
+  y: number;     // normalized value (OL readings are skipped, never charted)
+  oor?: boolean; // out-of-range: outside user-defined min/max, clamped to the bound
 }
 
 // The valid list lives in lib/settings.ts (it is persisted and validated there, and that
 // module must stay importable by the Node check script). Re-exported here so every existing
 // `import { type TimeRange } from '@/components/RealtimeChart'` keeps working.
 export type { TimeRange };
-
-const TIME_RANGE_MS: Record<TimeRange, number> = {
-  '10s': 10_000,
-  '1m': 60_000,
-  '10m': 600_000,
-  '1h': 3_600_000,
-  // Infinity disables the window filter so every buffered point is plotted.
-  all: Infinity,
-};
 
 const TIME_RANGE_LABELS: readonly TimeRange[] = TIME_RANGES;
 
@@ -192,17 +190,31 @@ const TOOLTIP_STYLE = {
   padding: 8,
 } as const;
 
-/** Format an absolute timestamp (ms) as a label relative to the window's latest
- *  point: 'Now' for the newest, otherwise a signed second offset like '-12s'. */
-function formatTimeOffset(ts: number, latestTs: number): string {
-  const off = Math.round((ts - latestTs) / 1000);
-  return off === 0 ? 'Now' : `${off}s`;
+/** Format an absolute timestamp (ms) as a signed second offset from the present: 'Now' at
+ *  the present, '-12s' before it, '+12s' after.
+ *
+ *  The '+' is not decoration. While a young session's window is still filling, the axis
+ *  extends past the present, so the right-hand ticks are in the FUTURE — a bare '6s' there
+ *  is typographically identical to a past offset and reads as if data existed. */
+function formatTimeOffset(ts: number, nowTs: number): string {
+  const off = Math.round((ts - nowTs) / 1000);
+  if (off === 0) return 'Now';
+  return off > 0 ? `+${off}s` : `${off}s`;
 }
 
 /** Build the (chart-type-dependent) Chart.js configuration. Histogram → bar of
  *  sample counts with a value x-axis; line → value-over-time area on a linear
- *  time axis (required by the decimation plugin — see the line branch). */
-function buildChartConfig(isHistogram: boolean, unit: string): ChartConfiguration {
+ *  time axis (required by the decimation plugin — see the line branch).
+ *
+ *  `nowRef` carries the present into the tick and tooltip callbacks. It cannot be a
+ *  parameter: the config is built once per chart type, while the labels must move with
+ *  the clock. It is NOT `scale.max` — while a young session's window is still filling,
+ *  `scale.max` is in the FUTURE, and labelling that edge 'Now' would be a lie. */
+function buildChartConfig(
+  isHistogram: boolean,
+  unit: string,
+  nowRef: { current: number },
+): ChartConfiguration {
   if (isHistogram) {
     return {
       type: 'bar',
@@ -248,16 +260,15 @@ function buildChartConfig(isHistogram: boolean, unit: string): ChartConfiguratio
     };
   }
 
-  // Line: a LINEAR time x-axis (ms timestamps as {x,y}) with parsing disabled so
-  // the built-in decimation plugin can downsample (it requires a linear/time axis
-  // + parsing:false + sorted data — all satisfied here). This, plus the linear
-  // axis pinning points to absolute positions, fixes the phantom *moving* spikes
-  // that appeared past ~1300 samples on the old category axis. `min-max` keeps
-  // both extremes of every pixel column, so a real transient is never visually
-  // dropped (the right guarantee for a meter); the trade-off is that sparse ±1 LSD
-  // noise still reads as a faint zig-zag band. Note the plugin only engages above
-  // 4×(chart CSS width) points (Chart.js default threshold).
-  // Per-point styling is scriptable (reads ctx.raw.oor) so it survives decimation.
+  // Line: a LINEAR time x-axis (ms timestamps as {x,y}) with parsing disabled. The
+  // linear axis pins points to absolute positions, which is what fixed the phantom
+  // *moving* spikes on the old category axis. It also satisfies the decimation
+  // plugin's preconditions (linear/time axis + parsing:false + sorted data). It needs
+  // 4×(chart CSS width) points, ~4000 at this layout, so it engages in 'all' and now
+  // also in '1h' — the buffer keeps a full hour, which is ~10,800 points at this meter's
+  // 3/s. `min-max` is the right algorithm for both: it keeps both extremes of every pixel
+  // column, so a real transient is never dropped. Out-of-range markers are a separate
+  // dataset with their own {x, y}, so they survive decimation too.
   return {
     type: 'line',
     data: {
@@ -268,15 +279,63 @@ function buildChartConfig(isHistogram: boolean, unit: string): ChartConfiguratio
           borderColor: '#3b82f6',
           backgroundColor: 'rgba(59,130,246,0.07)',
           borderWidth: 2,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          pointRadius: (ctx: any) => (ctx.raw?.oor ? 4 : 0),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          pointBackgroundColor: (ctx: any) => (ctx.raw?.oor ? '#ef4444' : '#3b82f6'),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          pointBorderColor: (ctx: any) => (ctx.raw?.oor ? '#ef4444' : '#3b82f6'),
+          // Static, deliberately. These were scriptable (reading ctx.raw.oor per point) and
+          // that cost ~2 KB of allocation PER POINT PER FRAME — 64% of everything the page
+          // allocated — because Chart.js builds a resolver context and a proxy for every
+          // element on every draw whenever any option is a function. The out-of-range
+          // markers now live in their own dataset below, so neither dataset needs one.
+          pointRadius: 0,
+          pointBackgroundColor: '#3b82f6',
+          pointBorderColor: '#3b82f6',
           tension: 0,
+          // The meter is quantized: it only ever reports integer multiples of one LSD,
+          // so the chart must never draw a vertex off that grid. Two independent guards,
+          // because either alone is one styling edit away from reopening the bug:
+          //
+          // 1. borderJoinStyle 'round' — Chart.js defaults joins to 'miter' and never
+          //    sets ctx.miterLimit, so Canvas2D's default limit of 10 applies and a tip
+          //    may run up to 10×borderWidth past the vertex. That overshoot grows as
+          //    segments approach vertical, and the x-axis auto-fits its range, so piling
+          //    up samples steepens every segment: measured 6–7px past a 17px LSD at ~800
+          //    samples (0.4 LSD of pure fiction) versus 1px at ~200. A round join is an
+          //    arc of radius borderWidth/2 centred on the vertex — bounded at any angle.
+          // 2. stepped 'middle' — there are no values between LSD levels, so a sloped
+          //    segment asserts readings the meter cannot produce. Stepping is both the
+          //    honest depiction and a geometry with no segment steep enough to overshoot.
+          //    'middle' puts the edge between the two samples so it is not attributed to
+          //    either timestamp. (tension is ignored under stepped; it is already 0.)
+          //
+          // borderWidth is the one remaining knob — residual extent is half of it, 1px
+          // today, within antialiasing. Deliberately left at 2. See docs/gotchas.md.
+          borderJoinStyle: 'round',
+          stepped: 'middle',
           normalized: true,
           fill: true,
+        },
+        {
+          // Out-of-range markers: the readings clamped to the operator's range bound, which
+          // is how a dropped measurement shows up while the part stays connected. Its own
+          // dataset so that BOTH datasets can be styled with constants.
+          //
+          // This is not the parallel-array mistake gotchas.md rejected: each marker carries
+          // its own {x, y}, so decimation may drop or reorder points in either dataset
+          // without a marker ever landing on the wrong sample. Index alignment is what was
+          // unsafe, not a second dataset.
+          label: 'out of range',
+          // Chart.js draws datasets in REVERSE of (order, index), so with both at the
+          // default order 0 this dataset paints first and the line paints over it. The
+          // markers were dataset-0 points before this split and sat on top; worse, the
+          // out-of-range value is CLAMPED to the range bound, so every marker lies exactly
+          // on the line's path and the 2px stroke bisects it instead of missing it.
+          // order -1 sorts this dataset first, so it is drawn last.
+          order: -1,
+          data: [],
+          showLine: false,
+          pointRadius: 4,
+          pointBackgroundColor: '#ef4444',
+          pointBorderColor: '#ef4444',
+          normalized: true,
+          fill: false,
         },
       ],
     },
@@ -289,17 +348,34 @@ function buildChartConfig(isHistogram: boolean, unit: string): ChartConfiguratio
       scales: {
         x: {
           type: 'linear',
+          // Only consulted in 'all', the one range with no min/max pinned (see the update
+          // effect). 'ticks' — the default — would round the fitted range out to the next
+          // tick boundary at BOTH ends, padding the plot with an empty band each side.
+          bounds: 'data',
           title: { display: false },
+          // Ticks are placed relative to the PRESENT, replacing the ones Chart.js generates
+          // from the axis minimum. Those are evenly spaced either way, but only aligned
+          // with the present when min === now - window, i.e. once the window has filled.
+          // While it is still filling, min is the session start and the '1h' view showed
+          // '-1484s, -884s, -284s, 316s…' with no 'Now' anywhere. No stepSize means 'all',
+          // which has no fixed window to align to — leave Chart.js's choice alone.
+          afterBuildTicks(axis: Scale) {
+            // `Scale` is typed with CoreScaleOptions, which knows nothing of ticks.stepSize
+            // — the update effect writes it there per range.
+            const step = (axis.options as { ticks?: { stepSize?: number } }).ticks?.stepSize;
+            if (!step) return;
+            axis.ticks = timeAxisTicks(axis.min, axis.max, step, nowRef.current)
+              .map((value) => ({ value }));
+          },
           ticks: {
             color: AXIS_COLOR,
             maxTicksLimit: 9,
             maxRotation: 0,
             minRotation: 0,
             font: MONO_FONT,
-            // `this` is the scale; this.max is the newest plotted timestamp ('Now').
-            callback(this: { max?: number }, value: string | number) {
-              return typeof value === 'number' && this.max != null
-                ? formatTimeOffset(value, this.max)
+            callback(value: string | number) {
+              return typeof value === 'number'
+                ? formatTimeOffset(value, nowRef.current)
                 : (value as string);
             },
           },
@@ -319,12 +395,17 @@ function buildChartConfig(isHistogram: boolean, unit: string): ChartConfiguratio
         decimation: { enabled: true, algorithm: 'min-max' },
         tooltip: {
           ...TOOLTIP_STYLE,
+          // Dataset 1 (the out-of-range markers) is for drawing, not for reading. Without
+          // this, `interaction.mode: 'index'` takes the element at the SAME INDEX in every
+          // dataset — and dataset 1 is a short, separately-indexed array, so hovering any
+          // point would add a second row showing an unrelated marker's value. Dataset 0
+          // already holds every sample, out-of-range ones included (clamped to the bound).
+          filter: (item: { datasetIndex: number }) => item.datasetIndex === 0,
           callbacks: {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             title: (items: any[]) => {
               const x = items[0]?.parsed?.x;
-              const max = items[0]?.chart?.scales?.x?.max;
-              return typeof x === 'number' && max != null ? formatTimeOffset(x, max) : '';
+              return typeof x === 'number' ? formatTimeOffset(x, nowRef.current) : '';
             },
           },
         },
@@ -342,6 +423,7 @@ export function RealtimeChart({
   onTimeRangeChange,
   binWidth,
   centerValue,
+  sessionStart,
 }: {
   data: ChartPoint[];
   unit: string;
@@ -351,14 +433,23 @@ export function RealtimeChart({
   onTimeRangeChange: (r: TimeRange) => void;
   binWidth?: number;
   centerValue?: number;
+  /** When this session's first point arrived; null between sessions. Anchors the
+   *  x-axis while the session is younger than the selected window. */
+  sessionStart?: number | null;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const chartRef = useRef<Chart | null>(null);
+  // The present, as the axis labels see it. Written by the update effect before every
+  // draw and read by the tick/tooltip callbacks, which the config closes over. Seeded in
+  // the create effect, not here: `Date.now()` during render is impure (lint enforces it),
+  // and the chart's very first draw happens before the update effect has run.
+  const nowRef = useRef(0);
   const [chartType, setChartType] = useState<ChartType>('line');
 
   useEffect(() => {
     if (!canvasRef.current) return;
-    const chart = new Chart(canvasRef.current, buildChartConfig(chartType === 'histogram', unit));
+    nowRef.current = Date.now();
+    const chart = new Chart(canvasRef.current, buildChartConfig(chartType === 'histogram', unit, nowRef));
     chartRef.current = chart;
     return () => {
       chart.destroy();
@@ -373,9 +464,13 @@ export function RealtimeChart({
     if (!chart) return;
 
     if (chartType === 'histogram') {
-      // Histogram bins the entire buffer (every captured sample), independent of
-      // the time-range window. (OL readings are already excluded upstream.)
-      const values = data.map((d) => d.v);
+      // Histogram bins the whole RETAINED buffer, independent of the time-range window —
+      // but not independent of the range that was last selected: outside 'all' the buffer
+      // is trimmed to BUFFER_RETENTION_MS (app/page.tsx), and the range selector is hidden
+      // in this view, so nothing on screen says what is bounding the distribution. The
+      // statistics panel is never trimmed and so can report a longer span than this.
+      // (OL readings are already excluded upstream.)
+      const values = data.map((d) => d.y);
       const { labels, counts, colors } = buildHistogram(values, binWidth, centerValue);
 
       chart.data.labels = labels;
@@ -398,27 +493,98 @@ export function RealtimeChart({
     }
 
     const now = Date.now();
+    nowRef.current = now; // what the tick and tooltip labels are offsets from
     const windowMs = TIME_RANGE_MS[timeRange];
     // {x: timestamp, y: value, oor} for the linear axis + parsing:false; the
     // decimation plugin min-max downsamples this to the canvas width before draw.
-    const points: { x: number; y: number; oor?: boolean }[] = [];
-    for (const d of data) {
-      if (now - d.ts <= windowMs) points.push({ x: d.ts, y: d.v, oor: d.oor });
+    // The visible window is a tail slice of the buffer (appended in timestamp order), and
+    // the buffer is already in Chart.js's shape — so this is one slice, not a per-sample
+    // rebuild. 'all' has no window: the dataset IS the buffer, no search and no copy.
+    const from = Number.isFinite(windowMs) ? firstIndexInWindow(data, now - windowMs) : 0;
+    const points = from === 0 ? data : data.slice(from);
+
+    // One pass for the two things that must look at every visible point: the window extent
+    // (for the y-axis floor) and the out-of-range subset (dataset 1). Allocates one short
+    // array and nothing per point — the markers are references into `points`, not copies.
+    const oorPoints: ChartPoint[] = [];
+    // Window extent, tracked in the pass that is already running (see the y-axis floor).
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const p of points) {
+      if (p.y < lo) lo = p.y;
+      if (p.y > hi) hi = p.y;
+      if (p.oor) oorPoints.push(p);
     }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    /* eslint-disable @typescript-eslint/no-explicit-any */
     chart.data.datasets[0].data = points as any;
+    chart.data.datasets[1].data = oorPoints as any;
+    /* eslint-enable @typescript-eslint/no-explicit-any */
+
+    // X range. A bounded range spans exactly its window, so pixels-per-second is a
+    // constant: the axis is anchored at the session start while the window fills (the
+    // trace grows rightward and nothing already drawn moves), then rolls with the clock.
+    // 'all' sets nothing and the axis fits the data instead — see resolveTimeWindow.
+    const xScale = chart.options.scales?.x as
+      | { min?: number; max?: number; ticks?: { stepSize?: number } }
+      | undefined;
+    if (xScale) {
+      const { min, max, stepSize } = resolveTimeWindow(timeRange, sessionStart ?? null, now);
+      // Assigned unconditionally, `undefined` included: Chart.js reuses this options
+      // object across updates, so a bounded range's min/max left behind would pin 'all'
+      // to a dead window — the same trap the y-axis floor below guards against.
+      xScale.min = min;
+      xScale.max = max;
+      if (xScale.ticks) xScale.ticks.stepSize = stepSize;
+    }
 
     const yScale = chart.options.scales?.y as
-      | { title?: { text?: string }; min?: number; max?: number }
+      | {
+          title?: { text?: string };
+          min?: number;
+          max?: number;
+          suggestedMin?: number;
+          suggestedMax?: number;
+        }
       | undefined;
     if (yScale) {
       if (yScale.title) yScale.title.text = unit;
       yScale.min = yMin; // undefined => Chart.js auto-scales
       yScale.max = yMax;
+
+      // Auto-scale fits [dataMin, dataMax] — which on a settled reading IS the meter's
+      // own ±1-count dither, so one count of noise gets magnified to the full canvas
+      // height and a steady measurement is displayed as violent movement. Floor the
+      // span at ±STABLE_LSD_TOLERANCE counts around the window's midpoint: reusing the
+      // stability gate's constant keeps ONE number in the codebase for "a change
+      // smaller than this is not a measurement" (docs/gotchas.md explains why it is 20
+      // and why 2 was too tight), so the chart stops resolving below the noise floor
+      // the app has already declared.
+      //
+      // suggestedMin/Max are soft — Chart.js takes min(dataMin, suggestedMin) — so real
+      // spread still widens the axis and a transient is never clipped. A hard min/max
+      // here would be wrong for a meter.
+      const floored =
+        yMin === undefined &&
+        yMax === undefined &&
+        typeof binWidth === 'number' &&
+        binWidth > 0 &&
+        Number.isFinite(binWidth) &&
+        lo <= hi;
+      // Cleared when not applicable: Chart.js reuses this options object across
+      // updates, so a stale suggestion would outlive the condition that set it.
+      if (floored) {
+        const half = STABLE_LSD_TOLERANCE * binWidth;
+        const mid = (lo + hi) / 2;
+        yScale.suggestedMin = mid - half;
+        yScale.suggestedMax = mid + half;
+      } else {
+        yScale.suggestedMin = undefined;
+        yScale.suggestedMax = undefined;
+      }
     }
     chart.update('none');
-  }, [data, unit, yMin, yMax, timeRange, chartType, binWidth, centerValue]);
+  }, [data, unit, yMin, yMax, timeRange, chartType, binWidth, centerValue, sessionStart]);
   /* eslint-enable react-hooks/immutability */
 
   return (

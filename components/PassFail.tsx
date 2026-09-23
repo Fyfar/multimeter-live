@@ -1,7 +1,7 @@
 'use client';
 
-import { memo, useMemo, useState } from 'react';
-import { AlertTriangle, Download, Terminal, Trash2 } from 'lucide-react';
+import { memo, useMemo } from 'react';
+import { AlertTriangle, Download, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { ActionButton } from '@/components/Controls';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
@@ -95,8 +95,6 @@ export function PassFail({
   rows,
   onClear,
   onExportCsv,
-  debugRaw,
-  onClearDebug,
 }: {
   reading: Reading | null;
   stable: boolean;
@@ -114,10 +112,7 @@ export function PassFail({
   rows: VerdictRow[];
   onClear: () => void;
   onExportCsv: () => void;
-  debugRaw: string[];
-  onClearDebug: () => void;
 }) {
-  const [showDebug, setShowDebug] = useState(false);
   const entryUnit = mode ? ENTRY_UNITS[mode].label : '';
 
   // Parsed on read, not on keystroke (see EntryField).
@@ -463,61 +458,6 @@ export function PassFail({
             <StatisticsPanel stats={summary.stats} unit={displayUnit(baseUnit)} bare layout="stack" title="Measured Spread" />
           </section>
         )}
-
-        {/* Raw stream inspector — what the meter actually sends. Still open: the exact
-            unit string it emits above nF (see parser.ts UNIT_RE). */}
-        <section className="rounded-lg border border-border bg-panel">
-          <button
-            onClick={() => setShowDebug((v) => !v)}
-            className="flex w-full items-center gap-2 px-4 py-3 text-xs font-semibold text-muted transition-colors hover:text-fg"
-          >
-            <Terminal size={13} />
-            Raw Stream
-            <span className="ml-auto font-mono text-[10px]">{showDebug ? '\u2212' : '+'}</span>
-          </button>
-          {showDebug && (
-            <div className="space-y-2 border-t border-border p-3">
-              {reading ? (
-                <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 font-mono text-[10px]">
-                  {([
-                    ['raw', JSON.stringify(reading.raw)],
-                    ['display', reading.display],
-                    ['unit', reading.unit === '' ? '(none)' : reading.unit],
-                    ['value', String(reading.value)],
-                    ['base', `${normalizeReading(reading).baseValue} ${normalizeReading(reading).baseUnit}`],
-                    ['mode', reading.mode],
-                    ['isOverload', String(reading.isOverload)],
-                    ['isMeasuring', String(reading.isMeasuring)],
-                    ['lsd', String(lsd)],
-                  ] as const).map(([k, v]) => (
-                    <div key={k} className="contents">
-                      <dt className="text-muted">{k}</dt>
-                      <dd className="truncate text-fg">{v}</dd>
-                    </div>
-                  ))}
-                </dl>
-              ) : (
-                <p className="text-[11px] text-muted">No reading yet.</p>
-              )}
-              <div className="max-h-44 overflow-y-auto rounded border border-border bg-canvas/60 p-2">
-                {debugRaw.length === 0 ? (
-                  <p className="text-[10px] text-muted">No packets captured.</p>
-                ) : (
-                  debugRaw.map((line, i) => (
-                    <div key={`${i}-${line}`} className="font-mono text-[10px] leading-relaxed text-muted">
-                      {line}
-                    </div>
-                  ))
-                )}
-              </div>
-              <p className="text-[10px] leading-relaxed text-muted">
-                Consecutive repeats are collapsed, so each line is a change in what the
-                meter sent.
-              </p>
-              <ActionButton onClick={onClearDebug} icon={<Trash2 size={13} />} label="Clear Buffer" />
-            </div>
-          )}
-        </section>
       </aside>
     </main>
   );

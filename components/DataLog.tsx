@@ -10,8 +10,14 @@ import { ActionButton } from '@/components/Controls';
 // One entry of the canonical filtered dataset (the single source of truth shared
 // with the chart, statistics, and CSV export). `id` is a stable React key + note
 // target; `note` is a session-scoped annotation that never alters the measurement;
-// `iso` is the reading's timestamp formatted once (reused by render, filter, CSV).
-export type LoggedRow = { id: number; reading: Reading; note: string; iso: string };
+// The timestamp is NOT stored formatted. It is `new Date(reading.ts).toISOString()`, derived
+// where it is used: in the memoized Row (windowed to MAX_RENDERED), in the filter below (which
+// returns early on an empty query), and at export time. Storing it cost 56 B on every row
+// forever to save a format call on at most 500 visible ones.
+export type LoggedRow = { id: number; reading: Reading; note: string };
+
+/** The row timestamp as the table, the filter and the CSV all render it. */
+export const rowIso = (r: Reading): string => new Date(r.ts).toISOString();
 
 // Shared grid for the table header and rows (matches the reference layout).
 const GRID_COLS = 'grid grid-cols-[minmax(0,2fr)_120px_minmax(0,1fr)_80px_minmax(0,3fr)]';
@@ -54,17 +60,22 @@ export function DataLog({
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return rows;
-    return rows.filter(({ reading: r, note, iso }) => {
+    // Formats a timestamp per row per keystroke, but only once the operator has typed
+    // something — the early return above is what keeps this off the capture path.
+    return rows.filter(({ reading: r, note }) => {
       const value = r.value === null ? 'OL' : String(r.value);
       return (
-        iso.toLowerCase().includes(q) ||
         r.mode.toLowerCase().includes(q) ||
         value.toLowerCase().includes(q) ||
         // Match either spelling: the operator may type "om" (what the meter sends and
         // what the CSV holds) or paste the symbol shown in the table.
         r.unit.toLowerCase().includes(q) ||
         displayUnit(r.unit).toLowerCase().includes(q) ||
-        note.toLowerCase().includes(q)
+        note.toLowerCase().includes(q) ||
+        // LAST deliberately: this one allocates a Date per row, and every cheaper predicate
+        // short-circuits past it. Only a query that matches nothing else pays for the whole
+        // log — 86k rows after eight hours at this meter's rate.
+        rowIso(r).toLowerCase().includes(q)
       );
     });
   }, [rows, query]);
@@ -224,10 +235,10 @@ const Row = memo(function Row({
   row: LoggedRow;
   onNoteChange: (id: number, note: string) => void;
 }) {
-  const { id, reading: r, note, iso } = row;
+  const { id, reading: r, note } = row;
   return (
     <div className={clsx(GRID_COLS, 'items-center border-b border-border/60 px-5 transition-colors hover:bg-surface/40')}>
-      <div className="py-3 font-mono text-xs text-muted">{iso}</div>
+      <div className="py-3 font-mono text-xs text-muted">{rowIso(r)}</div>
       <div className="py-3">
         <span className="inline-block rounded border border-accent/25 bg-accent/10 px-2 py-0.5 text-[11px] font-semibold text-accent">
           {MODE_LABELS[r.mode]}
