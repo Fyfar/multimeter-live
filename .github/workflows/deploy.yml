@@ -6,11 +6,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Least-privilege token: read the repo, write the Pages deployment.
+# Default to read-only; each job below widens only to what it actually needs.
+# Workflow-level `id-token: write` would hand an OIDC token to the BUILD job too,
+# which runs `npm ci` (third-party lifecycle scripts) and executes next.config.ts —
+# so anything in that job could mint a repo-scoped token. Only `deploy` needs it.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # Let an in-progress run finish (don't cancel a live deploy), but coalesce queued runs.
 concurrency:
@@ -20,6 +21,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Only because `Configure Pages` (enablement: true) calls the Pages API.
+      pages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,11 +32,29 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 22, not 20: every self-check below is a .mts run through Node's native
+          # type stripping. 22.6 added it behind --experimental-strip-types; 22.18
+          # is where it became the DEFAULT, which is what a bare `node x.mts` needs.
+          # setup-node's "22" resolves to the latest 22.x, well past that.
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      # Same gates as ci.yml, repeated here on purpose. ci.yml covers pull requests and
+      # non-main branches, so a commit pushed STRAIGHT to main would otherwise publish
+      # having run nothing but the build. `next build` typechecks, but it does not lint
+      # and it does not run the self-checks — and those exist precisely because the bugs
+      # they catch are silent (a wrong picture over correct data, a corrupt export).
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Self-checks
+        run: npm run check
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
@@ -53,6 +76,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
