@@ -1,10 +1,11 @@
 'use client';
 
-import { memo, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Download, Square, Play, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { MODE_LABELS, SCALE, type Mode, type Reading, displayUnit } from '@/lib/parser';
-import type { SampleStore } from '@/lib/samples';
+import { MODES, UNITS, type SampleStore } from '@/lib/samples';
+import { couldMatchIso, couldMatchValue, createIsoFormatter } from '@/lib/search';
 import { StatisticsPanel, type SessionStats } from '@/components/StatisticsPanel';
 import { ActionButton } from '@/components/Controls';
 
@@ -33,6 +34,38 @@ const rowIso = (ts: number): string => new Date(ts).toISOString();
  *  zeros, and 0.1450 at 0.1 mV resolution is not the same measurement as 0.145 at 1 mV. */
 const rowValue = (value: number, unit: string, decimals: number): string =>
   (value / (SCALE[unit]?.factor ?? 1)).toFixed(decimals);
+
+/** Typing is instant; the scan runs on the SETTLED query. Otherwise a ten-character
+ *  query costs ten full-session scans. */
+const SEARCH_DEBOUNCE_MS = 250;
+
+/** How much of the main thread a filtered refresh may take: the scan waits this multiple of
+ *  its own estimated duration before running again, so cost sets the cadence instead of a
+ *  constant that is wrong at one end of the range or the other. 4 => at most ~25% of one core. */
+const REFRESH_DUTY = 4;
+
+/**
+ * Per-row scan cost, microseconds. A FIXED estimate, not a measurement: timing the scan would
+ * mean calling `performance.now()` during render, which the React compiler rejects as impure
+ * (and it is — a memo that reads a clock is not idempotent).
+ *
+ * THREE rates, because the loop has three regimes and they span an order of magnitude. Pricing
+ * the middle one at the cheap rate is not a rounding error: a numeric query like `-0.0004` — a
+ * value an operator plainly searches for — runs `toFixed` on every row, and costing that as a
+ * Map lookup under-prices the pass ~6x. `REFRESH_DUTY` then schedules the next scan before the
+ * current one has even returned, and the duty cycle collapses back to ~100%, which is the bug
+ * the pacing exists to prevent.
+ *
+ * Measured over a 500k-row store (medians, µs/row): TEXT 0.062, VALUE 0.386, ISO 0.710.
+ * Rounded UP — over-pricing only backs the refresh off further, under-pricing wedges the tab.
+ *
+ * ponytail: fixed constants, so the duty cycle holds only on hardware near this one — a
+ * 3x slower machine runs 3x the duty. Upgrade path is a real measurement: stamp a ref when a
+ * paced scan is requested and read the clock in the effect that observes it land.
+ */
+const ROW_COST_US_TEXT = 0.1;
+const ROW_COST_US_VALUE = 0.45;
+const ROW_COST_US_ISO = 1.0;
 
 // Shared grid for the table header and rows (matches the reference layout).
 const GRID_COLS = 'grid grid-cols-[minmax(0,2fr)_120px_minmax(0,1fr)_80px_minmax(0,3fr)]';
@@ -72,22 +105,55 @@ export function DataLog({
   onNoteChange: (seq: number, note: string) => void;
 }) {
   const [query, setQuery] = useState('');
+  // The query the SCAN uses, one debounce behind the input. `query` drives the text field so
+  // typing stays instant; `appliedQuery` is what costs a pass over the session.
+  const [appliedQuery, setAppliedQuery] = useState('');
+  const [scanTick, setScanTick] = useState(0);
+  const lastScanAtRef = useRef(0);
+
+  useEffect(() => {
+    const id = setTimeout(() => {
+      // Stamp the deadline BEFORE applying the query. The memo follows `appliedQuery`
+      // directly, so changing it runs a scan immediately; without this stamp the pacing
+      // effect would then see a zero deadline and fire `run()` at once, repeating the very
+      // scan that just produced the rows on screen. Costs two full passes on the first
+      // query of a session and on any query typed after an idle gap.
+      lastScanAtRef.current = Date.now();
+      setAppliedQuery(query);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [query]);
+
   const liveValue = reading?.display ?? '—';
   const liveUnit = displayUnit(reading?.unit ?? '');
   const liveMode = reading ? MODE_LABELS[reading.mode] : 'No signal';
 
+  const hasQuery = appliedQuery.trim() !== '';
+
+  // A FILTERED scan is O(session): at seven days that is ~1.8 M rows, 100 ms for a text query
+  // and ~1.5 s for one that has to format timestamps. The capture loop bumps `sampleVersion`
+  // about three times a second, so re-scanning on every bump would wedge the tab outright —
+  // this is the whole reason the filtered path needs a clock of its own.
+  //
+  // So the scan paces itself off its own ESTIMATED cost: after a run it refuses to run again
+  // until `REFRESH_DUTY` times that duration has elapsed, then schedules one. A cheap query
+  // stays near-live; an expensive one backs off on its own, with no cap on how far back it
+  // searches. The UNFILTERED path is O(MAX_RENDERED) and stays on `sampleVersion` directly.
+  //
+  // ponytail: a full re-scan per refresh. New samples only ever land at the END, so this could
+  // be incremental (test the new tail, prepend matches, drop the overflow) if the backoff ever
+  // becomes visible — more state, so not until it does.
   // Display-only filter: never mutates the dataset or the statistics.
   //
-  // Scans BACKWARDS from the newest sample and stops once it has MAX_RENDERED matches, so a
-  // keystroke costs what the table shows rather than what the session holds. A multi-day
-  // session is millions of rows; filtering all of them per keystroke is not an option.
+  // Scans BACKWARDS from the newest sample and stops once it has MAX_RENDERED matches. There
+  // is no depth cap: a filter reaches the whole retained session. What keeps that affordable
+  // is the pacing above plus deciding every predicate it can OUTSIDE the loop.
   //
   // The price is that with a query active the total match count is unknowable, so the header
   // reports the displayed count instead (see `truncated` below). With no query the count is
   // exact, because it is just the store's.
-  const { visible, matched, truncated } = useMemo(() => {
-    void sampleVersion; // the store is a ref; this is what makes the memo re-run
-    const q = query.trim().toLowerCase();
+  const { visible, matched, truncated, scanMs } = useMemo(() => {
+    const q = appliedQuery.trim().toLowerCase();
     const out: RowData[] = [];
     const read = (i: number): RowData => {
       const sm = store.at(i);
@@ -100,35 +166,92 @@ export function DataLog({
     if (q === '') {
       const start = Math.max(0, store.count - MAX_RENDERED);
       for (let i = store.count - 1; i >= start; i--) out.push(read(i));
-      return { visible: out, matched: store.count, truncated: store.count > MAX_RENDERED };
+      return { visible: out, matched: store.count, truncated: store.count > MAX_RENDERED, scanMs: 0 };
     }
+
+    // Mode and unit come from small dictionaries and `store.at` hands back the dictionary's
+    // OWN string instances, so each distinct one is tested once and the loop just looks it up.
+    const modeHit = new Map<string, boolean>(MODES.map((m) => [m, m.toLowerCase().includes(q)]));
+    const unitHit = new Map<string, boolean>(
+      // Both spellings: the operator may type "om" (what the meter sends and what the CSV
+      // holds) or paste the symbol shown in the table.
+      UNITS.map((u) => [u, u.toLowerCase().includes(q) || displayUnit(u).toLowerCase().includes(q)]),
+    );
+    // The store APPENDS unrecognized units at runtime (see `lib/samples.ts`), so a unit that
+    // is not in `UNITS` is reachable here. A plain Map lookup would return `undefined` for it
+    // and silently drop a real match, so a miss computes and caches instead.
+    const unitMatches = (u: string): boolean => {
+      let hit = unitHit.get(u);
+      if (hit === undefined) {
+        hit = u.toLowerCase().includes(q) || displayUnit(u).toLowerCase().includes(q);
+        unitHit.set(u, hit);
+      }
+      return hit;
+    };
+
+    // Skip a predicate entirely when its output cannot contain the query.
+    const testValue = couldMatchValue(q);
+    const testIso = couldMatchIso(q);
+    // `toISOString` emits upper-case T/Z; matching against the raw string saves a per-row
+    // `toLowerCase()` allocation.
+    const upper = q.toUpperCase();
+    // ~3 samples share a wall-clock second, so the second-prefix is rebuilt a third as often.
+    // Formats a timestamp per scanned row, caching the per-second prefix. Defined in
+    // lib/search.ts so `scripts/check-search.mts` can assert it equals `toISOString()`.
+    const isoOf = createIsoFormatter();
 
     let scanned = 0;
     for (let i = store.count - 1; i >= 0 && out.length < MAX_RENDERED; i--) {
       scanned++;
       const r = read(i);
-      const value = rowValue(r.value, r.unit, r.decimals);
-      if (
-        r.mode.toLowerCase().includes(q) ||
-        value.toLowerCase().includes(q) ||
-        // Match either spelling: the operator may type "om" (what the meter sends and
-        // what the CSV holds) or paste the symbol shown in the table.
-        r.unit.toLowerCase().includes(q) ||
-        displayUnit(r.unit).toLowerCase().includes(q) ||
-        r.note.toLowerCase().includes(q) ||
-        // LAST deliberately: this one allocates a Date per row, and every cheaper predicate
-        // short-circuits past it.
-        rowIso(r.ts).toLowerCase().includes(q)
-      ) {
-        out.push(r);
-      }
+      if (modeHit.get(r.mode) || unitMatches(r.unit)) { out.push(r); continue; }
+      if (r.note !== '' && r.note.toLowerCase().includes(q)) { out.push(r); continue; }
+      if (testValue && rowValue(r.value, r.unit, r.decimals).includes(q)) { out.push(r); continue; }
+      if (testIso && isoOf(r.ts).includes(upper)) { out.push(r); continue; }
     }
     // `truncated` here means "there may be older matches", which is true exactly when the
     // scan stopped early rather than reaching the start of the store.
-    return { visible: out, matched: out.length, truncated: scanned < store.count };
-  }, [store, sampleVersion, query]);
+    return {
+      visible: out,
+      matched: out.length,
+      truncated: scanned < store.count,
+      // What that pass cost, for the pacing effect below. Derived, not clocked, so the memo
+      // stays pure. The regime MUST match the predicates the loop actually ran.
+      scanMs:
+        (scanned * (testIso ? ROW_COST_US_ISO : testValue ? ROW_COST_US_VALUE : ROW_COST_US_TEXT)) /
+        1000,
+    };
+    // The filtered path deliberately follows `scanTick` (paced) rather than `sampleVersion`.
+    //
+    // CONSEQUENCE, and it is deliberate: a note edit bumps `sampleVersion`, so while a filter
+    // is active the edit does not re-run this memo and `visible` keeps the pre-edit `note`
+    // for up to REFRESH_DUTY x scanMs. The controlled `<input>` still shows what was typed,
+    // because `Row` is memoized on SCALAR props and bails out — nothing re-renders it with
+    // the stale string. Do not add a non-scalar prop to `Row` or drop its memo without
+    // re-checking this: that bailout is what keeps the field from reverting mid-word.
+    // Feeding note edits in here instead would mean a full re-scan per keystroke, which is
+    // exactly the cost this pacing exists to avoid.
+  }, [store, hasQuery ? scanTick : sampleVersion, appliedQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const hasQuery = query.trim() !== '';
+  // Schedules the paced refresh described above. Lives after the memo because it paces off
+  // what the last scan cost. Effects may be impure, which is exactly why the clock is read
+  // here and not in the memo.
+  useEffect(() => {
+    if (!hasQuery) return;
+    const run = () => {
+      lastScanAtRef.current = Date.now();
+      setScanTick((t) => t + 1);
+    };
+    const wait = lastScanAtRef.current + scanMs * REFRESH_DUTY - Date.now();
+    if (wait <= 0) {
+      run();
+      return;
+    }
+    // Each new bump reschedules against a FIXED deadline, so `wait` only shrinks and the
+    // refresh cannot be starved by an unbroken stream of batches.
+    const id = setTimeout(run, wait);
+    return () => clearTimeout(id);
+  }, [sampleVersion, hasQuery, scanMs]);
 
   return (
     <>
@@ -212,7 +335,7 @@ export function DataLog({
               </div>
             ) : visible.length === 0 ? (
               <div className="flex h-full items-center justify-center px-5 py-10 text-center text-sm text-muted">
-                No rows match “{query}”.
+                No rows match “{appliedQuery}”.
               </div>
             ) : (
               <>
