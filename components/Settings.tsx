@@ -117,7 +117,7 @@ function NumberSetting({
 
 const HELP = {
   stability:
-    'How many consecutive readings of the same measurement the meter must report before a value counts as settled. Readings need not be identical — the meter’s last digit dithers, so a small band around the first one counts as the same value. Used by the “Stable values only” log filter and by Pass/Fail capture. Higher means stricter confirmation.',
+    'How many consecutive readings of the same measurement the meter must report before a value counts as settled. Readings need not be identical — the meter’s last digit dithers, so a small band around the first one counts as the same value. Used by the “Log distinct parts only” filter and by Pass/Fail capture. Higher means stricter confirmation.',
   hysteresis:
     'When logging is auto-started by the trigger, how far below the trigger threshold the reading must fall before logging auto-stops. A wider dead-band stops a signal hovering near the threshold from flapping logging on and off.',
   preserve:

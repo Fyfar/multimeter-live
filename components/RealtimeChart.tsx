@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Info } from 'lucide-react';
+import { clsx } from 'clsx';
 import {
-  TIME_RANGES, TIME_RANGE_MS, firstIndexInWindow, resolveTimeWindow, timeAxisTicks,
+  TIME_RANGES, TIME_RANGE_MS, resolveTimeWindow, timeAxisTicks,
   type TimeRange,
 } from '@/lib/settings';
 import {
@@ -16,13 +16,16 @@ import {
   BarElement,
   PointElement,
   Filler,
-  Decimation,
   Tooltip,
   Legend,
   type ChartConfiguration,
   type Scale,
 } from 'chart.js';
 import { resolutionDecimals, STABLE_LSD_TOLERANCE } from '@/lib/parser';
+import type { SampleStore } from '@/lib/samples';
+import {
+  DEFAULT_COLUMNS, RenderTier, quantizeAnchor, windowBucketMs, type TierPoint,
+} from '@/lib/tier';
 
 Chart.register(
   CategoryScale,
@@ -33,19 +36,9 @@ Chart.register(
   BarElement,
   PointElement,
   Filler,
-  Decimation,
   Tooltip,
   Legend,
 );
-
-/** A buffered sample, stored in the shape Chart.js consumes so nothing has to translate
- *  it on the way to the canvas. Named for the axes, not the domain, deliberately: this is
- *  a chart-facing projection of a `Reading` — the canonical record is `recordedRows`. */
-export interface ChartPoint {
-  x: number;     // Date.now() when the reading was parsed
-  y: number;     // normalized value (OL readings are skipped, never charted)
-  oor?: boolean; // out-of-range: outside user-defined min/max, clamped to the bound
-}
 
 // The valid list lives in lib/settings.ts (it is persisted and validated there, and that
 // module must stay importable by the Node check script). Re-exported here so every existing
@@ -82,16 +75,14 @@ const formatBinLabel = (v: number, width: number): string => v.toFixed(resolutio
 
 type Histogram = { labels: string[]; counts: number[]; colors: string[] };
 
-/** Min and max of a non-empty array in a single pass. */
-function minMax(values: number[]): [number, number] {
-  let min = values[0];
-  let max = values[0];
-  for (const v of values) {
-    if (v < min) min = v;
-    if (v > max) max = v;
-  }
-  return [min, max];
-}
+/**
+ * One distinct measured value and how many readings landed on it. The histogram is fed
+ * counts, not samples: the source is a map keyed on the LSD-snapped value, whose size is
+ * bounded by how many distinct values the meter displayed rather than by how long the
+ * session ran. That is what lets a multi-day distribution cost ~100 KB instead of
+ * re-binning a growing array on every update.
+ */
+type Entry = readonly [value: number, count: number];
 
 /**
  * LSD grid: bins are integer multiples of `width`, anchored at zero, so each bar is
@@ -102,8 +93,16 @@ function minMax(values: number[]): [number, number] {
  * under-range bin (left) and over-range bin (right) so a lone outlier doesn't
  * stretch the whole view.
  */
-function buildLsdHistogram(values: number[], width: number, centerValue: number | undefined): Histogram {
-  const c = Number.isFinite(centerValue) ? (centerValue as number) : (values.length > 0 ? values[0] : 0);
+function buildLsdHistogram(entries: Entry[], width: number, centerValue: number | undefined): Histogram {
+  // Fallback centre when the caller supplies none. `entries` comes from a Map, so
+  // `entries[0]` is whichever value happened to be logged FIRST this session — session-order
+  // noise, not a centre. The most-counted value is the same thing `centerValue` normally
+  // carries, so falling back to it degrades gracefully instead of arbitrarily.
+  let c = Number.isFinite(centerValue) ? (centerValue as number) : 0;
+  if (!Number.isFinite(centerValue) && entries.length > 0) {
+    let best = -1;
+    for (const [v, n] of entries) if (n > best) { best = n; c = v; }
+  }
   const centerBin = Math.round(c / width);
   const minHalf = Math.floor((MIN_BINS - 1) / 2);
 
@@ -111,7 +110,7 @@ function buildLsdHistogram(values: number[], width: number, centerValue: number 
   // MAX_HALF_BINS of the center (so a genuine spread still shows in full).
   let lo = centerBin - minHalf;
   let hi = centerBin + minHalf;
-  for (const v of values) {
+  for (const [v] of entries) {
     const b = Math.round(v / width);
     if (b >= centerBin - MAX_HALF_BINS && b <= centerBin + MAX_HALF_BINS) {
       if (b < lo) lo = b;
@@ -123,11 +122,14 @@ function buildLsdHistogram(values: number[], width: number, centerValue: number 
   const inRange = new Array<number>(inCount).fill(0);
   let under = 0;
   let over = 0;
-  for (const v of values) {
+  // `+= n`, never `+= 1`: the input is counts per distinct value, so counting each
+  // distinct value once would make every bar height wrong — most visibly on the steady
+  // readings a distribution exists to show.
+  for (const [v, n] of entries) {
     const b = Math.round(v / width);
-    if (b < lo) under += 1;
-    else if (b > hi) over += 1;
-    else inRange[b - lo] += 1;
+    if (b < lo) under += n;
+    else if (b > hi) over += n;
+    else inRange[b - lo] += n;
   }
 
   const labels: string[] = [];
@@ -151,16 +153,24 @@ function buildLsdHistogram(values: number[], width: number, centerValue: number 
   return { labels, counts, colors };
 }
 
-/** Fallback when the device LSD is unknown: BIN_COUNT equal-width bins over min→max. */
-function buildEqualWidthHistogram(values: number[]): Histogram {
-  if (values.length === 0) return { labels: [], counts: [], colors: [] };
-  const [min, max] = minMax(values);
-  if (min === max) return { labels: [formatBinLabel(min, 1)], counts: [values.length], colors: [IN_RANGE_COLOR] };
+/** Fallback when the device LSD is unknown: BIN_COUNT equal-width bins over min→max.
+ *  Reachable whenever `binWidth` is undefined — not a dead path. */
+function buildEqualWidthHistogram(entries: Entry[]): Histogram {
+  if (entries.length === 0) return { labels: [], counts: [], colors: [] };
+  let min = Infinity;
+  let max = -Infinity;
+  let total = 0;
+  for (const [v, n] of entries) {
+    if (v < min) min = v;
+    if (v > max) max = v;
+    total += n;
+  }
+  if (min === max) return { labels: [formatBinLabel(min, 1)], counts: [total], colors: [IN_RANGE_COLOR] };
   const width = (max - min) / BIN_COUNT;
   const counts = new Array<number>(BIN_COUNT).fill(0);
   const labels = new Array<string>(BIN_COUNT);
   for (let i = 0; i < BIN_COUNT; i++) labels[i] = formatBinLabel(min + i * width, width);
-  for (const v of values) counts[Math.min(BIN_COUNT - 1, Math.floor((v - min) / width))] += 1;
+  for (const [v, n] of entries) counts[Math.min(BIN_COUNT - 1, Math.floor((v - min) / width))] += n;
   return { labels, counts, colors: new Array<string>(BIN_COUNT).fill(IN_RANGE_COLOR) };
 }
 
@@ -169,11 +179,19 @@ function buildEqualWidthHistogram(values: number[]): Histogram {
  * histogram. Uses the LSD grid when `binWidth` is a valid resolution, else the
  * equal-width fallback. `centerValue` frames the empty (pre-recording) window.
  */
-function buildHistogram(values: number[], binWidth: number | undefined, centerValue: number | undefined): Histogram {
+function buildHistogram(entries: Entry[], binWidth: number | undefined, centerValue: number | undefined): Histogram {
   return typeof binWidth === 'number' && binWidth > 0 && Number.isFinite(binWidth)
-    ? buildLsdHistogram(values, binWidth, centerValue)
-    : buildEqualWidthHistogram(values);
+    ? buildLsdHistogram(entries, binWidth, centerValue)
+    : buildEqualWidthHistogram(entries);
 }
+
+/**
+ * Column width the 'all' view starts at, before it begins doubling. Deliberately far finer
+ * than the meter's ~330 ms sample interval so a short session is drawn sample-for-sample
+ * rather than as coarse steps; 50 ms x 1,000 columns covers the first ~50 s, and the tier
+ * widens itself from there (seven days is about fourteen doublings, each O(columns)).
+ */
+const ALL_INITIAL_BUCKET_MS = 50;
 
 const AXIS_COLOR = '#8b949e';
 const GRID_COLOR = 'rgba(48,54,61,0.5)';
@@ -204,7 +222,7 @@ function formatTimeOffset(ts: number, nowTs: number): string {
 
 /** Build the (chart-type-dependent) Chart.js configuration. Histogram → bar of
  *  sample counts with a value x-axis; line → value-over-time area on a linear
- *  time axis (required by the decimation plugin — see the line branch).
+ *  time axis, which pins points to absolute positions rather than to slot order.
  *
  *  `nowRef` carries the present into the tick and tooltip callbacks. It cannot be a
  *  parameter: the config is built once per chart type, while the labels must move with
@@ -214,6 +232,7 @@ function buildChartConfig(
   isHistogram: boolean,
   unit: string,
   nowRef: { current: number },
+  unitRef: { current: string },
 ): ChartConfiguration {
   if (isHistogram) {
     return {
@@ -262,13 +281,14 @@ function buildChartConfig(
 
   // Line: a LINEAR time x-axis (ms timestamps as {x,y}) with parsing disabled. The
   // linear axis pins points to absolute positions, which is what fixed the phantom
-  // *moving* spikes on the old category axis. It also satisfies the decimation
-  // plugin's preconditions (linear/time axis + parsing:false + sorted data). It needs
-  // 4×(chart CSS width) points, ~4000 at this layout, so it engages in 'all' and now
-  // also in '1h' — the buffer keeps a full hour, which is ~10,800 points at this meter's
-  // 3/s. `min-max` is the right algorithm for both: it keeps both extremes of every pixel
-  // column, so a real transient is never dropped. Out-of-range markers are a separate
-  // dataset with their own {x, y}, so they survive decimation too.
+  // *moving* spikes on the old category axis.
+  //
+  // Chart.js's `decimation` plugin is gone — no longer imported, registered or enabled. It
+  // engaged when this was handed the raw buffer (~10,800 points at '1h'), but `RenderTier`
+  // reduces to at most 2 x DEFAULT_COLUMNS points in every mode, far below the plugin's
+  // 4x-canvas-width activation threshold, so it could never fire again. The same `min-max`
+  // guarantee it provided is now the tier's, asserted in scripts/check-tier.mts rather than
+  // trusted to a plugin.
   return {
     type: 'line',
     data: {
@@ -318,9 +338,10 @@ function buildChartConfig(
           // dataset so that BOTH datasets can be styled with constants.
           //
           // This is not the parallel-array mistake gotchas.md rejected: each marker carries
-          // its own {x, y}, so decimation may drop or reorder points in either dataset
-          // without a marker ever landing on the wrong sample. Index alignment is what was
-          // unsafe, not a second dataset.
+          // its own {x, y}, so the two datasets can hold different numbers of points —
+          // which they do, the markers being a filtered subset — without a marker ever
+          // landing on the wrong sample. Index alignment is what was unsafe, not a second
+          // dataset.
           label: 'out of range',
           // Chart.js draws datasets in REVERSE of (order, index), so with both at the
           // default order 0 this dataset paints first and the line paints over it. The
@@ -343,7 +364,7 @@ function buildChartConfig(
       animation: false,
       responsive: true,
       maintainAspectRatio: false,
-      parsing: false, // {x,y} data — required by the decimation plugin
+      parsing: false, // {x,y} data: read as given, no per-point key lookup
       interaction: { intersect: false, mode: 'index' },
       scales: {
         x: {
@@ -383,16 +404,27 @@ function buildChartConfig(
           border: { color: GRID_COLOR },
         },
         y: {
-          title: { display: true, text: unit, color: AXIS_COLOR, font: { size: 11 } },
+          // The unit goes on the TICKS, not in a scale title. Chart.js v4 has no rotation
+          // option for a scale title, so a y-axis title is always drawn sideways — which
+          // reads as a broken glyph for a symbol like the ohm sign, where `V` merely looks
+          // conventional. Repeating it per tick costs axis width and reads correctly.
+          title: { display: false },
           beginAtZero: false,
-          ticks: { color: AXIS_COLOR, font: MONO_FONT },
+          ticks: {
+            color: AXIS_COLOR,
+            font: MONO_FONT,
+            callback(this: { getLabelForValue: (v: number) => string }, value: string | number) {
+              const label = this.getLabelForValue(Number(value));
+              const u = unitRef.current;
+              return u ? `${label} ${u}` : label;
+            },
+          },
           grid: { color: GRID_COLOR },
           border: { color: GRID_COLOR },
         },
       },
       plugins: {
         legend: { display: false },
-        decimation: { enabled: true, algorithm: 'min-max' },
         tooltip: {
           ...TOOLTIP_STYLE,
           // Dataset 1 (the out-of-range markers) is for drawing, not for reading. Without
@@ -415,7 +447,12 @@ function buildChartConfig(
 }
 
 export function RealtimeChart({
-  data,
+  store,
+  sampleVersion,
+  chartFromSeq,
+  chartEpoch,
+  counts,
+  stableOnly,
   unit,
   yMin,
   yMax,
@@ -425,7 +462,34 @@ export function RealtimeChart({
   centerValue,
   sessionStart,
 }: {
-  data: ChartPoint[];
+  /** THE canonical store. Read, never copied — this component keeps no per-sample state. */
+  store: SampleStore;
+  /** Bumped once per batch; the store is a ref, so this is what makes the effect re-run. */
+  sampleVersion: number;
+  /** Physical reading starts here: a preserve-log mode change leaves older rows in the
+   *  store that the table keeps and the chart must not draw. */
+  chartFromSeq: number;
+  /** Bumped when the incremental tier is invalidated — watermark advance, or a retention
+   *  trim dropping a chunk out from under its oldest columns. */
+  chartEpoch: number;
+  /** Readings per LSD-snapped value. Bounded by distinct values, not by sample count. */
+  counts: Map<number, number>;
+  /**
+   * Whether "Log distinct parts only" is active. The line view is UNAVAILABLE while it is.
+   *
+   * The filter is a gate: a reading that is not a confirmed, materially-changed measurement
+   * is never recorded anywhere. So the recorded series is a sequence of discrete
+   * measurements, minutes apart, not a time series — a `10s` window routinely contains none
+   * of them, and a line drawn between two of them would assert a value held across a gap
+   * where the meter was measuring something else entirely (a probe lift, the next part).
+   * Drawing nothing is honest but looks broken; drawing a line is dishonest. So the view
+   * says why and points at the histogram, which plots the same recorded entries.
+   *
+   * Note this is about the SECOND gate as much as the first: on top of stability, a settled
+   * value is only recorded if it differs from the last recorded one by 50% or more. One part
+   * held on the probes therefore produces exactly one entry, ever.
+   */
+  stableOnly: boolean;
   unit: string;
   yMin?: number;
   yMax?: number;
@@ -444,37 +508,54 @@ export function RealtimeChart({
   // the create effect, not here: `Date.now()` during render is impure (lint enforces it),
   // and the chart's very first draw happens before the update effect has run.
   const nowRef = useRef(0);
+  // The unit, as the y-axis tick callback sees it. A ref for the same reason `nowRef` is
+  // one: the config closes over it and the chart is only re-created on `chartType`. Seeded
+  // from the initializer so the very first draw has it, then written by the update effect —
+  // never during render, which lint enforces.
+  const unitRef = useRef(unit);
   const [chartType, setChartType] = useState<ChartType>('line');
+  // No canvas is mounted while this is true, so the create effect must re-run when it
+  // clears — hence its presence in that effect's dependency list.
+  const lineUnavailable = stableOnly && chartType === 'line';
+  // What the line view draws: min and max per column, ~2,000 points however long the
+  // session is. A ref because it is mutated in place across updates.
+  const tierRef = useRef<RenderTier>(new RenderTier(DEFAULT_COLUMNS));
+  // Incremental-feed bookkeeping for 'all'. `fedTo` is the physical index already folded
+  // in; -1 means the tier holds something else (a bounded window) and must be rebuilt.
+  const fedToRef = useRef(-1);
+  const fedFromRef = useRef(-1);
+  const epochRef = useRef(-1);
 
   useEffect(() => {
-    if (!canvasRef.current) return;
+    if (lineUnavailable || !canvasRef.current) return;
     nowRef.current = Date.now();
-    const chart = new Chart(canvasRef.current, buildChartConfig(chartType === 'histogram', unit, nowRef));
+    const chart = new Chart(canvasRef.current, buildChartConfig(chartType === 'histogram', unit, nowRef, unitRef));
     chartRef.current = chart;
     return () => {
       chart.destroy();
       chartRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartType]);
+  }, [chartType, lineUnavailable]);
 
   /* eslint-disable react-hooks/immutability */
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart) return;
+    if (!chart || lineUnavailable) return;
 
+    unitRef.current = unit;
     if (chartType === 'histogram') {
-      // Histogram bins the whole RETAINED buffer, independent of the time-range window —
-      // but not independent of the range that was last selected: outside 'all' the buffer
-      // is trimmed to BUFFER_RETENTION_MS (app/page.tsx), and the range selector is hidden
-      // in this view, so nothing on screen says what is bounding the distribution. The
-      // statistics panel is never trimmed and so can report a longer span than this.
-      // (OL readings are already excluded upstream.)
-      const values = data.map((d) => d.y);
-      const { labels, counts, colors } = buildHistogram(values, binWidth, centerValue);
+      // Counts per distinct value, accumulated as entries are recorded — NOT a re-bin of
+      // the stored samples, which is what keeps a multi-day distribution affordable. Fed by
+      // the same `logSample` gate as everything else, so the bars always total the session's
+      // sample count. They have no time dimension, though, so the distribution covers the
+      // whole recording session even after retention has dropped the oldest samples from the
+      // table and the CSV. (OL and no-part readings are excluded upstream, as everywhere.)
+      const entries: Entry[] = [...counts];
+      const { labels, counts: binCounts, colors } = buildHistogram(entries, binWidth, centerValue);
 
       chart.data.labels = labels;
-      chart.data.datasets[0].data = counts;
+      chart.data.datasets[0].data = binCounts;
       // Per-bar color so under-/over-range outlier bins read as distinct (amber).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (chart.data.datasets[0] as any).backgroundColor = colors;
@@ -494,27 +575,63 @@ export function RealtimeChart({
 
     const now = Date.now();
     nowRef.current = now; // what the tick and tooltip labels are offsets from
+    unitRef.current = unit; // what the y-axis tick callback appends
     const windowMs = TIME_RANGE_MS[timeRange];
-    // {x: timestamp, y: value, oor} for the linear axis + parsing:false; the
-    // decimation plugin min-max downsamples this to the canvas width before draw.
-    // The visible window is a tail slice of the buffer (appended in timestamp order), and
-    // the buffer is already in Chart.js's shape — so this is one slice, not a per-sample
-    // rebuild. 'all' has no window: the dataset IS the buffer, no search and no copy.
-    const from = Number.isFinite(windowMs) ? firstIndexInWindow(data, now - windowMs) : 0;
-    const points = from === 0 ? data : data.slice(from);
+    const tier = tierRef.current;
+    // Physical index the chart may start at. A preserve-log mode change advances the
+    // watermark instead of clearing the store, so older rows survive in the table and the
+    // CSV while the trace restarts in the new unit.
+    const from = Math.max(0, Math.min(store.count, chartFromSeq - store.firstSeq));
 
-    // One pass for the two things that must look at every visible point: the window extent
-    // (for the y-axis floor) and the out-of-range subset (dataset 1). Allocates one short
-    // array and nothing per point — the markers are references into `points`, not copies.
-    const oorPoints: ChartPoint[] = [];
-    // Window extent, tracked in the pass that is already running (see the y-axis floor).
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const p of points) {
-      if (p.y < lo) lo = p.y;
-      if (p.y > hi) hi = p.y;
-      if (p.oor) oorPoints.push(p);
+    if (Number.isFinite(windowMs)) {
+      // Bounded window: rebuild every update. The window SLIDES, so columns expire from the
+      // left and cannot be maintained incrementally — and it is bounded by definition, so
+      // the rebuild is cheap (1h is ~11,000 samples at this meter's rate, well under a
+      // millisecond). `tsAt`/`valueAt` are scalar reads, so the scan allocates nothing.
+      // Both defined in lib/tier.ts, where the self-check can assert them: the width leaves
+      // two columns of headroom, and the anchor is snapped to an absolute bucket boundary so
+      // a sliding window shifts the tier by whole columns instead of re-dealing every sample
+      // into a different bucket each frame.
+      const bucketMs = windowBucketMs(windowMs);
+      const t0 = quantizeAnchor(now - windowMs, bucketMs);
+      // Start ONE sample before the window so the trace enters from the left edge instead
+      // of starting wherever the first in-window sample happens to fall. At 10s that gap is
+      // up to 3% of the width; with "Stable values only" on it can be the whole window,
+      // leaving an empty chart while the meter is plainly reading. `add` folds a pre-t0
+      // sample into column 0 and keeps its own timestamp, so Chart.js clips the segment at
+      // the edge correctly.
+      const start = Math.max(from, store.indexAtOrAfter(t0) - 1);
+      tier.reset(t0, bucketMs);
+      for (let i = start; i < store.count; i++) tier.add(store.tsAt(i), store.valueAt(i));
+      fedToRef.current = -1; // the tier now holds a window, not the session
+    } else {
+      // 'all': maintained incrementally, so per-update work does not grow with the session.
+      // Rebuilt only when the tier's contents are invalidated — a watermark advance, a
+      // retention trim that shifted indices, or arriving here from a bounded window.
+      const stale =
+        fedToRef.current < 0 ||
+        epochRef.current !== chartEpoch ||
+        fedFromRef.current !== from ||
+        fedToRef.current > store.count;
+      if (stale) {
+        tier.reset(store.count > from ? store.tsAt(from) : now, ALL_INITIAL_BUCKET_MS);
+        for (let i = from; i < store.count; i++) tier.add(store.tsAt(i), store.valueAt(i));
+        fedFromRef.current = from;
+        epochRef.current = chartEpoch;
+      } else {
+        for (let i = fedToRef.current; i < store.count; i++) tier.add(store.tsAt(i), store.valueAt(i));
+      }
+      fedToRef.current = store.count;
     }
+
+    // The drawn series and the out-of-range markers, both from the reduction. The
+    // operator's y-range is applied HERE, not at capture, so changing it re-clamps the
+    // whole session rather than only what arrives afterwards.
+    const points = tier.points(yMin, yMax);
+    const oorPoints = points.filter((p: TierPoint) => p.oor);
+    const extent = tier.extent();
+    const lo = extent ? extent.min : Infinity;
+    const hi = extent ? extent.max : -Infinity;
 
     /* eslint-disable @typescript-eslint/no-explicit-any */
     chart.data.datasets[0].data = points as any;
@@ -529,7 +646,20 @@ export function RealtimeChart({
       | { min?: number; max?: number; ticks?: { stepSize?: number } }
       | undefined;
     if (xScale) {
-      const { min, max, stepSize } = resolveTimeWindow(timeRange, sessionStart ?? null, now);
+      const win = resolveTimeWindow(timeRange, sessionStart ?? null, now);
+      const { stepSize } = win;
+      let min = win.min;
+      let max = win.max;
+      if (!Number.isFinite(windowMs)) {
+        // 'all' has no fixed window, so the axis fits the data — but "the data" must mean
+        // the STORE's bounds, not the tier's last emitted point. A bucket emits its min and
+        // max, and which of those is newest hops around inside the newest bucket as samples
+        // arrive, so letting Chart.js auto-fit made the axis maximum jump every update: the
+        // whole plot area re-laid-out and the right-hand label flickered between `Now` and
+        // `-1s`. Real sample timestamps only ever move forward.
+        min = store.count > from ? store.tsAt(from) : undefined;
+        max = store.count > 0 ? store.tsAt(store.count - 1) : undefined;
+      }
       // Assigned unconditionally, `undefined` included: Chart.js reuses this options
       // object across updates, so a bounded range's min/max left behind would pin 'all'
       // to a dead window — the same trap the y-axis floor below guards against.
@@ -548,7 +678,8 @@ export function RealtimeChart({
         }
       | undefined;
     if (yScale) {
-      if (yScale.title) yScale.title.text = unit;
+      // Line view: the unit is rendered by the tick callback, which reads `unitRef`.
+      // Histogram: it is the x-axis title, set in that branch above.
       yScale.min = yMin; // undefined => Chart.js auto-scales
       yScale.max = yMax;
 
@@ -584,7 +715,12 @@ export function RealtimeChart({
       }
     }
     chart.update('none');
-  }, [data, unit, yMin, yMax, timeRange, chartType, binWidth, centerValue, sessionStart]);
+    // `counts` is listed for the linter and for documentation only: its identity is stable
+    // (it is cleared in place, never replaced), so it can never re-run this effect by
+    // itself. `sampleVersion` is what actually does — including for the counts-only case,
+    // where the stable filter suppresses logging but the histogram still changes.
+  }, [store, sampleVersion, chartFromSeq, chartEpoch, counts, unit, yMin, yMax, timeRange,
+      chartType, binWidth, centerValue, sessionStart, lineUnavailable]);
   /* eslint-enable react-hooks/immutability */
 
   return (
@@ -597,23 +733,30 @@ export function RealtimeChart({
         <div className="flex items-center gap-2">
           {/* Chart-type selector */}
           <div className="flex overflow-hidden rounded-md border border-border">
-            {CHART_TYPE_LABELS.map(({ type, label }) => (
-              <button
-                key={type}
-                onClick={() => setChartType(type)}
-                className={`px-3 py-1 text-xs font-medium transition-colors ${
-                  chartType === type
-                    ? 'bg-accent text-white'
-                    : 'text-muted hover:bg-surface hover:text-fg'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+            {CHART_TYPE_LABELS.map(({ type, label }) => {
+              const unavailable = stableOnly && type === 'line';
+              return (
+                <button
+                  key={type}
+                  onClick={() => setChartType(type)}
+                  disabled={unavailable}
+                  title={unavailable ? 'Not available while "Log distinct parts only" is on' : undefined}
+                  className={clsx(
+                    'px-3 py-1 text-xs font-medium transition-colors',
+                    chartType === type
+                      ? 'bg-accent text-white'
+                      : 'text-muted hover:bg-surface hover:text-fg',
+                    unavailable && 'cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted',
+                  )}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
 
-          {/* Time-range selector (line view only) */}
-          {chartType === 'line' && (
+          {/* Time-range selector (line view only, and only when it is actually drawn) */}
+          {chartType === 'line' && !lineUnavailable && (
             <div className="flex overflow-hidden rounded-md border border-border">
               {TIME_RANGE_LABELS.map((r) => (
                 <button
@@ -633,19 +776,30 @@ export function RealtimeChart({
         </div>
       </div>
 
-      {/* All-mode performance note */}
-      {chartType === 'line' && timeRange === 'all' && (
-        <div className="mb-3 flex items-center gap-2 rounded-md border border-amber/40 px-3 py-2 text-xs text-amber">
-          <Info className="h-3.5 w-3.5 shrink-0" />
-          <span>
-            Showing all points — rendering a large session may impact performance.
-          </span>
-        </div>
-      )}
-
-      {/* Chart canvas */}
+      {/* Chart canvas — or, while the line view is unavailable, why it is. */}
       <div className="relative h-80">
-        <canvas ref={canvasRef} />
+        {lineUnavailable ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 rounded-md border border-dashed border-border px-8 text-center">
+            <p className="text-sm font-semibold text-fg">
+              Line view is not available with “Log distinct parts only”
+            </p>
+            <p className="max-w-md text-xs leading-relaxed text-muted">
+              That filter records one entry per settled measurement, so entries can be minutes
+              apart. A line drawn between two of them would claim the value was held in
+              between, when the meter was measuring something else — a probe lift, or the next
+              The histogram plots the recorded entries, so a batch of parts reads as a
+              distribution of their measured values.
+            </p>
+            <button
+              onClick={() => setChartType('histogram')}
+              className="rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-semibold text-fg transition-colors hover:brightness-125"
+            >
+              Show histogram
+            </button>
+          </div>
+        ) : (
+          <canvas ref={canvasRef} />
+        )}
       </div>
     </section>
   );

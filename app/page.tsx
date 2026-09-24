@@ -4,27 +4,26 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { MoreVertical } from 'lucide-react';
 import { clsx } from 'clsx';
 import { DigitalDisplay } from '@/components/DigitalDisplay';
-import { RealtimeChart, type ChartPoint, type TimeRange } from '@/components/RealtimeChart';
+import { RealtimeChart, type TimeRange } from '@/components/RealtimeChart';
 import { Controls } from '@/components/Controls';
 import { Sidebar, NAV_IDS, type NavId } from '@/components/Sidebar';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
-import { DataLog, rowIso, type LoggedRow } from '@/components/DataLog';
+import { DataLog } from '@/components/DataLog';
 import { Settings } from '@/components/Settings';
 import { NoDataWarning } from '@/components/NoDataWarning';
 import { PassFail } from '@/components/PassFail';
 import {
-  displayUnit, normalizeReading, readingResolution, resolutionDecimals, withinStableBand,
-  type Reading,
+  SCALE, displayDecimals, displayUnit, normalizeReading, readingResolution,
+  resolutionDecimals, withinStableBand, type Mode, type Reading,
 } from '@/lib/parser';
+import { RETENTION_MS, SampleStore } from '@/lib/samples';
 import {
   ENTRY_UNITS, entryToBase, formatEntryValue, isSupportedMode, judge, parseSiValue,
   resolveAbsoluteTolerance, resolveBand,
   type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
 import { useSerial, type SerialStatus } from '@/lib/useSerial';
-import {
-  BUFFER_RETENTION_MS, DEFAULT_SETTINGS, firstIndexInWindow, loadSettings, saveSettings,
-} from '@/lib/settings';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '@/lib/settings';
 import { createBeeper, type Beeper } from '@/lib/beep';
 import { csvBlob, csvEsc } from '@/lib/csv';
 // App version — single source of truth is package.json "version". Bump it on every
@@ -93,10 +92,22 @@ export default function Home() {
   // lifted, and comparing those produces a spurious FAIL.
   const [currentStable, setCurrentStable] = useState(false);
   const [recording, setRecording] = useState(false);
-  const [chartPoints, setChartPoints] = useState<ChartPoint[]>([]);
+  // Bumped once per batch when the batch changed anything the UI reads. The store is a ref,
+  // so nothing else tells React the numbers moved — this is the array identity that the two
+  // spread-copy buffers used to provide, stated as a value instead of implied by a copy.
+  const [sampleVersion, setSampleVersion] = useState(0);
+  // Where the chart, statistics and histogram start reading. Advanced instead of clearing the
+  // store when a mode change preserves the log, so the table and CSV keep rows the chart must
+  // not draw (the `settings` preserve-log-on-mode-change toggle). State, not just a ref: the
+  // chart's update effect keys off its dependency array and a ref never changes identity.
+  const [chartFromSeq, setChartFromSeq] = useState(0);
+  const chartFromSeqRef = useRef(0);
+  // Bumped whenever the chart's incremental tier is invalidated — a watermark advance, or a
+  // retention trim dropping a chunk out from under its oldest buckets.
+  const [chartEpoch, setChartEpoch] = useState(0);
   // When the current session's first point arrived. The chart anchors its x-axis here
   // while the session is younger than the selected window. Deliberately NOT derived from
-  // chartPoints[0]: the buffer is trimmed, so its oldest point is a fact about retention,
+  // the store's oldest sample: it is trimmed, so that is a fact about retention,
   // not about the session. Today retention covers the longest window and the two would
   // agree — which is exactly why deriving it would be a trap, since shortening retention
   // later would silently break the anchor instead of failing loudly.
@@ -128,7 +139,7 @@ export default function Home() {
   // never judged. Cleared synchronously on a mode change.
   const [pfReferenceSettled, setPfReferenceSettled] = useState('');
   const [pfToleranceSettled, setPfToleranceSettled] = useState('');
-  // Captured verdicts for the current batch. Separate from `recordedRows`: the two
+  // Captured verdicts for the current batch. Separate from the sample store: the two
   // have different lifecycles and clear independently.
   const [passFailRows, setPassFailRows] = useState<VerdictRow[]>([]);
   const passFailRowsRef = useRef<VerdictRow[]>([]);
@@ -145,12 +156,14 @@ export default function Home() {
   // brief outlier (short/disconnect) doesn't pull the window off the main reading.
   const [dominantValue, setDominantValue] = useState<number | null>(null);
 
-  // Canonical filtered dataset: single source of truth for the Data Log table and CSV.
-  // Chart buffer and stats are projections fed from the same log site. OL is never added.
-  // The ref mirrors it so exportCsv stays a stable callback.
-  const [recordedRows, setRecordedRows] = useState<LoggedRow[]>([]);
-  const recordedRowsRef = useRef<LoggedRow[]>([]);
-  const rowIdRef = useRef(0);
+  // THE canonical dataset — single source of truth for the chart, the histogram, the
+  // statistics, the Data Log table and the CSV. Every one of those is a projection of this
+  // store; none keeps a per-sample copy of its own (`filtered-data-source`). A ref, because
+  // it is mutated in the read loop; `sampleVersion` is what render depends on.
+  // Held in state with a lazy initializer rather than a ref: the instance never changes, so
+  // this is one stable identity for the component's life and render never touches `.current`.
+  // It is mutated in place by the read loop; `sampleVersion` is what tells React so.
+  const [store] = useState<SampleStore>(() => new SampleStore());
 
   type SessionStats = { count: number; mean: number; m2: number; min: number; max: number };
   const statsRef = useRef<SessionStats>({ count: 0, mean: 0, m2: 0, min: Infinity, max: -Infinity });
@@ -201,7 +214,10 @@ export default function Home() {
   const recordedResolutionRef = useRef<number | null>(null);
   // Reading count per LSD-snapped value -> the dominant (most-held) value, which centers
   // the histogram window so a brief outlier can't pull it off.
-  const rawCountsRef = useRef<Map<number, number>>(new Map());
+  // Readings per LSD-snapped value. Held in state with a lazy initializer, not a ref, so it
+  // is one stable identity that render can pass as a prop — and CLEARED in place rather than
+  // replaced, which is what keeps that identity stable across a session reset.
+  const [rawCounts] = useState<Map<number, number>>(() => new Map());
   const dominantValueRef = useRef<number | null>(null);
   const dominantCountRef = useRef(0);
 
@@ -317,7 +333,11 @@ export default function Home() {
   // browser in its own right (bfcache eligibility, PWA install heuristics), so an idle app
   // must not carry one. This also covers the service worker's Reload button, which goes
   // through window.location.reload() and is this app's most likely cause of session loss.
-  const hasRows = recordedRows.length > 0 || passFailRows.length > 0;
+  // The store is mutated in place, so `sampleVersion` is what re-renders this component;
+  // the reads themselves are plain and re-evaluate on every render.
+  void sampleVersion;
+  const sampleCount = store.count;
+  const hasRows = sampleCount > 0 || passFailRows.length > 0;
   useEffect(() => {
     if (!hasRows) return;
     const warn = (e: BeforeUnloadEvent) => {
@@ -339,31 +359,40 @@ export default function Home() {
   }, []);
 
   // Reset the single-unit projections (chart, stats, histogram derivation, stable run)
-  // while KEEPING the canonical rows — the "keep log on mode change" path. Those views
+  // while KEEPING the canonical samples — the "keep log on mode change" path. Those views
   // can't mix units; the per-row table/CSV can (each row carries its own mode/unit).
+  //
+  // This is the ONE thing two parallel buffers were genuinely buying, and it costs one
+  // integer: the store is untouched and the chart simply starts reading later. Clearing the
+  // store here would take the operator's log with it.
   const resetSessionDerived = useCallback(() => {
     statsRef.current = { count: 0, mean: 0, m2: 0, min: Infinity, max: -Infinity };
     runAnchorRef.current = null;
     stableRunRef.current = 0;
     lastLoggedValueRef.current = null;
     recordedResolutionRef.current = null;
-    rawCountsRef.current = new Map();
+    rawCounts.clear();
     dominantValueRef.current = null;
     dominantCountRef.current = 0;
+    // Next unused seq: everything already stored belongs to the previous unit.
+    const next = store.firstSeq + store.count;
+    chartFromSeqRef.current = next;
+    setChartFromSeq(next);
+    setChartEpoch((e) => e + 1);
     setSessionStats(null);
-    setChartPoints([]);
     setSessionStart(null);
     setRecordedResolution(null);
     setDominantValue(null);
-  }, []);
+  }, [store, rawCounts]);
 
-  // Full session flush: clear the canonical recorded rows AND every derived projection.
+  // Full session flush: clear the canonical store AND every derived projection.
   const flushSession = useCallback(() => {
-    recordedRowsRef.current = [];
-    rowIdRef.current = 0;
-    setRecordedRows([]);
+    // `clear()` keeps seq monotonic, so the watermark below lands past every seq ever used
+    // and a stale watermark can never sit ahead of new samples.
+    store.clear();
+    setSampleVersion((v) => v + 1);
     resetSessionDerived();
-  }, [resetSessionDerived]);
+  }, [resetSessionDerived, store]);
 
   const handleReadings = useCallback(
     (readings: Reading[]) => {
@@ -371,17 +400,45 @@ export default function Home() {
       lastDataAtRef.current = Date.now();
       setCurrent(readings[readings.length - 1]);
 
-      // Range and trigger bounds are constant for the whole batch — resolve once.
-      const rMin = autoScaleRef.current ? null : toFinite(rangeMin);
-      const rMax = autoScaleRef.current ? null : toFinite(rangeMax);
       let armed = triggerArmedRef.current;
       let threshold = triggerThresholdRef.current;
       let release = threshold !== null ? threshold * (1 - hysteresisPctRef.current / 100) : null;
 
       let recordingChanged = false;
-      const newPoints: ChartPoint[] = [];
-      const newRows: LoggedRow[] = [];
+      // ONE staging array, appended to the store once at the end of the batch. Not a
+      // performance choice — a batch is three to ten samples — but a control-flow one: the
+      // loop discards already-collected samples on a mode change and on a trigger edge, and
+      // a store appended per sample has no un-append.
+      //
+      // Collapsing the old `newPoints`/`newRows` pair into one also repairs a live bug: the
+      // trigger branch below used to clear only `newPoints`, so a re-trigger mid-batch kept
+      // rows in the log whose chart points had been dropped — two consumers disagreeing, in
+      // the function whose comment claims their membership is identical by construction.
+      const staged: { ts: number; value: number; mode: Mode; unit: string; decimals: number }[] = [];
+      // Whether this batch changed anything the UI reads: a staged sample, or a retention
+      // trim that dropped one. Everything the UI reads now lives behind the same gate.
+      let touched = false;
       const newVerdicts: VerdictRow[] = [];
+
+      // Append what is staged so far. Called at a mode change that preserves the log —
+      // those samples belong to the OLD unit, so they must reach the store before the
+      // watermark moves past them — and once at the end of the batch.
+      //
+      // It deliberately computes nothing about `sessionStart`. A candidate captured here
+      // would be captured against whatever the watermark was AT THE TIME, and the preserve
+      // path advances the watermark immediately afterwards — so the candidate would be an
+      // old-unit sample that the advance then excludes from the chart. The anchor is derived
+      // once, at the end of the batch, from the FINAL watermark.
+      //
+      // Samples appended SINCE THE LAST RESET in this batch. Zeroed at every reset site,
+      // because statsRef is zeroed there too: counting across a reset would commit a
+      // freshly-zeroed stats object over the `null` the reset queued.
+      let appended = 0;
+      const flushStaged = () => {
+        for (const st of staged) store.append(st.ts, st.value, st.mode, st.unit, st.decimals);
+        appended += staged.length;
+        staged.length = 0;
+      };
       for (const r of readings) {
         const { baseValue, baseUnit } = normalizeReading(r);
 
@@ -396,12 +453,17 @@ export default function Home() {
           // single-unit and always reset). The first detection has no prior data, so a
           // full flush is equivalent. Old-unit rows stay valid in their original unit.
           if (wasInitialized && preserveOnModeChangeRef.current) {
+            // Samples staged before the change are old-unit rows the operator asked to keep.
+            // They must reach the store BEFORE the watermark advances, or the watermark
+            // lands behind them and the chart draws the previous unit.
+            flushStaged();
             resetSessionDerived();
+            appended = 0;
           } else {
+            staged.length = 0;
             flushSession();
-            newRows.length = 0;
+            appended = 0;
           }
-          newPoints.length = 0;
           // A real mode/unit change makes the in-progress data and threshold
           // meaningless in the new unit — stop logging, then reset the trigger
           // (clear threshold + disarm). (Skip on the first reading, which is
@@ -440,8 +502,11 @@ export default function Home() {
         // Trigger edges (evaluated before recording so the crossing sample is captured).
         const mag = baseValue !== null ? Math.abs(baseValue) : null;
         if (armed && threshold !== null && !recordingRef.current && mag !== null && mag > threshold) {
+          // Clears EVERYTHING staged, chart and log alike. Previously only the chart half was
+          // dropped here; see the `staged` comment above.
+          staged.length = 0;
           flushSession();
-          newPoints.length = 0;
+          appended = 0;
           recordingRef.current = true;
           triggerStartedRef.current = true;
           recordingChanged = true;
@@ -545,22 +610,37 @@ export default function Home() {
               if (logSample) lastLoggedValueRef.current = baseValue;
             }
 
-            // Time at this LSD-snapped value -> the dominant value that centers the
-            // histogram. Counts every reading, so a held value beats a brief outlier.
-            if (lsd !== null) {
-              const k = Math.round(baseValue / lsd) * lsd;
-              const c = (rawCountsRef.current.get(k) ?? 0) + 1;
-              rawCountsRef.current.set(k, c);
-              if (c > dominantCountRef.current) {
-                dominantCountRef.current = c;
-                dominantValueRef.current = k;
-              }
-            }
-
             if (logSample) {
-              // Chart point + Welford update below are projections of this same entry, fed
-              // in the same iteration -> identical membership.
-              newRows.push({ id: rowIdRef.current++, reading: r, note: '' });
+              // Readings per LSD-snapped value: the histogram's bars and the dominant value
+              // that centres its window. INSIDE the `logSample` gate, with everything else.
+              //
+              // It sat outside once, counting every reading regardless of the filter. That
+              // made the histogram grow three times a second while the Samples tile stayed
+              // at the number of recorded entries — two readouts of the same session
+              // disagreeing by orders of magnitude. The filter is a gate: a reading it
+              // rejects is not recorded anywhere, and that has to include here.
+              if (lsd !== null) {
+                const k = Math.round(baseValue / lsd) * lsd;
+                const c = (rawCounts.get(k) ?? 0) + 1;
+                rawCounts.set(k, c);
+                if (c > dominantCountRef.current) {
+                  dominantCountRef.current = c;
+                  dominantValueRef.current = k;
+                }
+              }
+              // Everything in this block is behind the same gate, deliberately: the store,
+              // the histogram counts, the recorded resolution and the statistics. Hoisting
+              // any of it to the `recordingRef` level one scope out would silently disable
+              // "Stable values only" for that consumer — no compile error, and no visible
+              // symptom until two readouts of the same session disagree.
+              staged.push({
+                ts: r.ts,
+                value: baseValue,
+                mode: r.mode,
+                unit: r.unit,
+                decimals: displayDecimals(r.display),
+              });
+              touched = true;
               // Track the coarsest LSD among logged readings → bin width + stat
               // decimals reflect the recorded data, range-robust to auto-ranging.
               if (lsd !== null) {
@@ -573,12 +653,8 @@ export default function Home() {
               s.m2 += delta * (baseValue - s.mean);
               if (baseValue < s.min) s.min = baseValue;
               if (baseValue > s.max) s.max = baseValue;
-              // Clamp to range and flag out-of-range in a single pass.
-              let chartV = baseValue;
-              let oor = false;
-              if (rMax !== null && baseValue > rMax) { chartV = rMax; oor = true; }
-              else if (rMin !== null && baseValue < rMin) { chartV = rMin; oor = true; }
-              newPoints.push({ x: r.ts, y: chartV, oor });
+              // No clamping here. The operator's y-range is applied when the chart draws, so
+              // changing it re-clamps the whole session instead of only what arrives next.
             }
           }
 
@@ -586,39 +662,33 @@ export default function Home() {
         }
       }
 
-      if (newPoints.length > 0) {
-        // Once per batch, never in the per-sample loop. Functional so it cannot race the
-        // reset above: that queues null first, so `prev` is null here and this stamps.
-        setSessionStart((prev) => prev ?? newPoints[0].x);
-        // Resolved out here, not inside the updater: React may invoke an updater twice
-        // (StrictMode), and a clock read in there would trim to two different instants.
-        const trimBefore = Date.now() - BUFFER_RETENTION_MS;
-        setChartPoints((prev) => {
-          const combined = [...prev, ...newPoints];
-          // 'all' mode accumulates the full session — never trimmed.
-          // ponytail: unbounded, and `combined` is a full copy every batch, so both memory
-          // and per-batch work grow with session length (~86k points and an 86k-element copy
-          // 3x/second after 8 hours at this meter's rate). Deliberate: a ceiling here would
-          // reintroduce the count-vs-time confusion this trim removed, and switching to a
-          // bounded range already discards anything older than BUFFER_RETENTION_MS. The real
-          // fix is a decimated render tier plus an append that does not copy — measured and
-          // written up, not built.
-          if (timeRangeRef.current === 'all') return combined;
-          // Otherwise keep the longest bounded window, BY TIME. A sample count cannot do
-          // this job: it only covers an hour at an assumed packet rate, and the previous
-          // 3600 covered 20 minutes at this meter's 3/s, so the '1h' view was permanently
-          // missing its oldest two thirds. The buffer is in timestamp order, so the cut is
-          // a binary search and one slice.
-          const from = firstIndexInWindow(combined, trimBefore);
-          return from === 0 ? combined : combined.slice(from);
-        });
+      // ---- Once per batch, never in the per-sample loop ------------------------
+      flushStaged();
+
+      // Retention, applied to the ONE store: past seven days the oldest samples leave the
+      // table and the CSV too, not just the chart. A dropped chunk invalidates the chart's
+      // incremental tier, which is what `chartEpoch` tells it.
+      if (store.trim(Date.now() - RETENTION_MS)) {
+        setChartEpoch((e) => e + 1);
+        touched = true;
       }
 
-      // Batched append, ref updated synchronously so exportCsv reads the latest.
-      if (newRows.length > 0) {
-        recordedRowsRef.current = [...recordedRowsRef.current, ...newRows];
-        setRecordedRows(recordedRowsRef.current);
+      // The chart's x-axis anchor: the oldest sample the chart can actually see, read from
+      // the store against the FINAL watermark rather than tracked during the batch. Stating
+      // it as a derivation instead of a running candidate is what makes it immune to a
+      // mid-batch watermark advance — the preserve-log mode change flushes old-unit samples
+      // and THEN advances, so anything captured before that advance is the previous unit.
+      //
+      // Functional so it cannot race a reset earlier in this batch: that queues null first,
+      // so `prev` is null here and this stamps. Cheap to evaluate every batch, and a no-op
+      // once stamped.
+      const anchorIdx = Math.max(0, chartFromSeqRef.current - store.firstSeq);
+      if (store.count > anchorIdx) {
+        const at = store.tsAt(anchorIdx);
+        setSessionStart((prev) => prev ?? at);
       }
+
+      if (touched) setSampleVersion((v) => v + 1);
 
       // Same batched append for the Pass/Fail store.
       if (newVerdicts.length > 0) {
@@ -639,15 +709,16 @@ export default function Home() {
       if (recordingChanged) setRecording(recordingRef.current);
 
       // Only when something was actually logged: statsRef mutates inside `if (logSample)`,
-      // so with the stable filter on most batches change nothing.
-      if (newRows.length > 0) setSessionStats({ ...statsRef.current });
+      // so with the stable filter on most batches change nothing and a fresh object identity
+      // would re-render StatisticsPanel three times a second for nothing.
+      if (appended > 0) setSessionStats({ ...statsRef.current });
 
       // Mirror the recorded resolution + dominant value to state. (Unchanged when
       // nothing was logged this batch — e.g. logging stopped → React bails out.)
       setRecordedResolution(recordedResolutionRef.current);
       setDominantValue(dominantValueRef.current);
     },
-    [flushSession, resetSessionDerived, rangeMin, rangeMax],
+    [flushSession, resetSessionDerived, store, rawCounts],
   );
 
   const { status, error, connect, disconnect } = useSerial(handleReadings);
@@ -721,23 +792,40 @@ export default function Home() {
     if (v) setRec(true);
   }, [setRec]);
 
-  // Per-row note edit: annotation only — never touches the reading or statistics.
-  const handleNoteChange = useCallback((id: number, note: string) => {
-    const next = recordedRowsRef.current.map((row) => (row.id === id ? { ...row, note } : row));
-    recordedRowsRef.current = next;
-    setRecordedRows(next);
-  }, []);
+  // Per-row note edit: annotation only — never touches the reading or statistics. Keyed on
+  // `seq`, which survives retention trimming, so a note cannot migrate to another row. The
+  // version bump is load-bearing: the note input is controlled, and with the store in a ref
+  // nothing else would tell React to re-render it, so the operator would type into a field
+  // that never updates.
+  const handleNoteChange = useCallback((seq: number, note: string) => {
+    store.setNote(seq, note);
+    setSampleVersion((v) => v + 1);
+  }, [store]);
 
-  // Serializes the same canonical store the Data Log renders. Numeric only (OL is
-  // excluded upstream), so r.value is always present.
+  // Serializes the same canonical store the Data Log renders and the chart draws. Numeric
+  // only (OL is excluded upstream), so every stored value is a real measurement.
+  //
+  // The value column is reconstructed in the unit the meter reported, from the stored base
+  // value and digit count, so the file is unchanged from before the store existed —
+  // including the mixed-unit case where auto-ranging put mV and V rows in one export.
+  // `toFixed`, never `String`: a number has no memory of trailing zeros, and `0.1450` at
+  // 0.1 mV resolution is a different measurement from `0.145` at 1 mV.
   const exportCsv = useCallback(() => {
     function* lines() {
-      for (const { reading: r, note } of recordedRowsRef.current) {
-        yield [rowIso(r), r.mode, String(r.value), r.unit, csvEsc(note)].join(',');
+      for (let i = 0; i < store.count; i++) {
+        const sm = store.at(i);
+        const factor = SCALE[sm.unit]?.factor ?? 1;
+        yield [
+          new Date(sm.ts).toISOString(),
+          sm.mode,
+          (sm.value / factor).toFixed(sm.decimals),
+          sm.unit,
+          csvEsc(sm.note),
+        ].join(',');
       }
     }
     downloadCsv(csvBlob('Timestamp,Mode,Value,Unit,Notes', lines()), `multimeter-${Date.now()}.csv`);
-  }, []);
+  }, [store]);
 
   // Numbers in the mode's ENTRY unit (ohms/volts/farads) with the unit in its own
   // column, so the file holds plain numbers rather than SI-prefixed strings.
@@ -766,22 +854,41 @@ export default function Home() {
   // (which renders the unsupported-mode explanation).
   const passFailMode = current && isSupportedMode(current.mode) ? current.mode : null;
 
+  // Stays on the statistics, NOT on store.count: statistics are session-scoped and
+  // legitimately exceed the retained window past seven days, and this is deliberately 0
+  // after a preserve-log reset. Reading the store here would put two differently-valued
+  // tiles labelled "Samples" on one screen.
   const recordedCount = sessionStats?.count ?? 0;
-  const canExport = recordedRows.length > 0;
-  const effectiveYMin = autoScale ? undefined : (toFinite(rangeMin) ?? undefined);
-  const effectiveYMax = autoScale ? undefined : (toFinite(rangeMax) ?? undefined);
+  const canExport = sampleCount > 0;
+  // An inverted manual range (minimum at or above maximum) describes no window at all.
+  // Applying it would hand Chart.js `min > max`, which silently renders an empty or
+  // upside-down axis — so it is ignored and auto-scaling continues, and Controls says so
+  // instead of leaving the operator to wonder why their numbers did nothing.
+  const rangeMinNum = toFinite(rangeMin);
+  const rangeMaxNum = toFinite(rangeMax);
+  const rangeInvalid =
+    !autoScale && rangeMinNum !== null && rangeMaxNum !== null && rangeMinNum >= rangeMaxNum;
+  const effectiveYMin = autoScale || rangeInvalid ? undefined : (rangeMinNum ?? undefined);
+  const effectiveYMax = autoScale || rangeInvalid ? undefined : (rangeMaxNum ?? undefined);
   // Histogram bin width + stat decimals. With data present, use the frozen coarsest
   // recorded resolution so both stay stable when logging stops and the live value
   // auto-ranges or goes OL; when empty, derive from the live reading as a preview.
   const liveNumeric = current && normalizeReading(current).baseValue !== null ? current : null;
+  // Samples the CHART can see — everything at or after the watermark. Deliberately not
+  // `sampleCount`: after a preserve-log mode change the store still holds the previous
+  // unit's rows while `recordedResolution` and `dominantValue` have just been nulled, so
+  // gating on the store would resolve both to `undefined` and silently switch the histogram
+  // off the LSD grid, switch off the ±20 LSD y-axis floor, and drop statDecimals to a
+  // 3-decimal fallback in both panels.
+  const chartCount = Math.max(0, store.count - (chartFromSeq - store.firstSeq));
   const binWidth =
-    chartPoints.length > 0
+    chartCount > 0
       ? (recordedResolution ?? undefined)
       : (liveNumeric ? (readingResolution(liveNumeric) ?? undefined) : undefined);
   // Histogram window center: the time-dominant recorded value when data is present
   // (outliers fall into under/over-range bins), else the live reading for preview.
   const centerValue =
-    chartPoints.length > 0
+    chartCount > 0
       ? (dominantValue ?? undefined)
       : (liveNumeric ? (normalizeReading(liveNumeric).baseValue ?? undefined) : undefined);
   // Measurement resolution as decimal places (1 Ω → 0, 0.0001 V → 4) for stat formatting.
@@ -845,7 +952,12 @@ export default function Home() {
                   sampleCount={recordedCount}
                 />
                 <RealtimeChart
-                  data={chartPoints}
+                  store={store}
+                  sampleVersion={sampleVersion}
+                  chartFromSeq={chartFromSeq}
+                  chartEpoch={chartEpoch}
+                  counts={rawCounts}
+                  stableOnly={stableOnly}
                   sessionStart={sessionStart}
                   unit={chartUnit}
                   yMin={effectiveYMin}
@@ -862,6 +974,7 @@ export default function Home() {
             {/* Right panel */}
             <Controls
               rangeMin={rangeMin}
+            rangeInvalid={rangeInvalid}
               rangeMax={rangeMax}
               onRangeMinChange={setRangeMin}
               onRangeMaxChange={setRangeMax}
@@ -879,6 +992,7 @@ export default function Home() {
               stableOnly={stableOnly}
               onStableOnlyChange={handleStableOnlyChange}
               onClear={flushSession}
+            canClear={sampleCount > 0}
               onExportCsv={exportCsv}
               canExport={canExport}
             />
@@ -887,7 +1001,8 @@ export default function Home() {
           <DataLog
             reading={current}
             recording={recording}
-            rows={recordedRows}
+            store={store}
+            sampleVersion={sampleVersion}
             stats={sessionStats}
             unit={chartUnit}
             decimals={statDecimals}

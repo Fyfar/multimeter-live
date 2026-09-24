@@ -3,21 +3,36 @@
 import { memo, useMemo, useState } from 'react';
 import { Search, Download, Square, Play, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
-import { MODE_LABELS, type Reading, displayUnit } from '@/lib/parser';
+import { MODE_LABELS, SCALE, type Mode, type Reading, displayUnit } from '@/lib/parser';
+import type { SampleStore } from '@/lib/samples';
 import { StatisticsPanel, type SessionStats } from '@/components/StatisticsPanel';
 import { ActionButton } from '@/components/Controls';
 
-// One entry of the canonical filtered dataset (the single source of truth shared
-// with the chart, statistics, and CSV export). `id` is a stable React key + note
-// target; `note` is a session-scoped annotation that never alters the measurement;
-// The timestamp is NOT stored formatted. It is `new Date(reading.ts).toISOString()`, derived
-// where it is used: in the memoized Row (windowed to MAX_RENDERED), in the filter below (which
-// returns early on an empty query), and at export time. Storing it cost 56 B on every row
-// forever to save a format call on at most 500 visible ones.
-export type LoggedRow = { id: number; reading: Reading; note: string };
+/**
+ * Exactly what one rendered row needs, as SCALARS. Deliberately not the store's `Sample`
+ * object: `Row` is memoized on prop identity, and `store.at(i)` returns a fresh object on
+ * every call, so passing it would defeat the memo and re-render every visible row three
+ * times a second — worse than before the store existed.
+ */
+type RowData = {
+  seq: number;
+  ts: number;
+  value: number;
+  mode: Mode;
+  unit: string;
+  decimals: number;
+  note: string;
+};
 
-/** The row timestamp as the table, the filter and the CSV all render it. */
-export const rowIso = (r: Reading): string => new Date(r.ts).toISOString();
+/** The row timestamp as the table and the CSV both render it. Formatted where it is used,
+ *  never stored — at most 500 rows are visible, and the session may hold millions. */
+const rowIso = (ts: number): string => new Date(ts).toISOString();
+
+/** The value as the meter reported it: base value back through its unit's factor, at the
+ *  meter's own digit count. `toFixed`, never `String` — a number has no memory of trailing
+ *  zeros, and 0.1450 at 0.1 mV resolution is not the same measurement as 0.145 at 1 mV. */
+const rowValue = (value: number, unit: string, decimals: number): string =>
+  (value / (SCALE[unit]?.factor ?? 1)).toFixed(decimals);
 
 // Shared grid for the table header and rows (matches the reference layout).
 const GRID_COLS = 'grid grid-cols-[minmax(0,2fr)_120px_minmax(0,1fr)_80px_minmax(0,3fr)]';
@@ -29,7 +44,8 @@ const MAX_RENDERED = 500;
 export function DataLog({
   reading,
   recording,
-  rows,
+  store,
+  sampleVersion,
   stats,
   unit,
   decimals,
@@ -41,7 +57,11 @@ export function DataLog({
 }: {
   reading: Reading | null;
   recording: boolean;
-  rows: LoggedRow[];
+  /** THE canonical store, shared with the chart and the CSV. Read, never copied. */
+  store: SampleStore;
+  /** Bumped once per batch and on a note edit; the store is a ref, so this is the only
+   *  thing that tells React anything changed. */
+  sampleVersion: number;
   stats: SessionStats | null;
   unit: string;
   decimals?: number;
@@ -49,7 +69,7 @@ export function DataLog({
   onExportCsv: () => void;
   onToggleRecord: () => void;
   onClear: () => void;
-  onNoteChange: (id: number, note: string) => void;
+  onNoteChange: (seq: number, note: string) => void;
 }) {
   const [query, setQuery] = useState('');
   const liveValue = reading?.display ?? '—';
@@ -57,37 +77,58 @@ export function DataLog({
   const liveMode = reading ? MODE_LABELS[reading.mode] : 'No signal';
 
   // Display-only filter: never mutates the dataset or the statistics.
-  const filtered = useMemo(() => {
+  //
+  // Scans BACKWARDS from the newest sample and stops once it has MAX_RENDERED matches, so a
+  // keystroke costs what the table shows rather than what the session holds. A multi-day
+  // session is millions of rows; filtering all of them per keystroke is not an option.
+  //
+  // The price is that with a query active the total match count is unknowable, so the header
+  // reports the displayed count instead (see `truncated` below). With no query the count is
+  // exact, because it is just the store's.
+  const { visible, matched, truncated } = useMemo(() => {
+    void sampleVersion; // the store is a ref; this is what makes the memo re-run
     const q = query.trim().toLowerCase();
-    if (!q) return rows;
-    // Formats a timestamp per row per keystroke, but only once the operator has typed
-    // something — the early return above is what keeps this off the capture path.
-    return rows.filter(({ reading: r, note }) => {
-      const value = r.value === null ? 'OL' : String(r.value);
-      return (
+    const out: RowData[] = [];
+    const read = (i: number): RowData => {
+      const sm = store.at(i);
+      return {
+        seq: sm.seq, ts: sm.ts, value: sm.value,
+        mode: sm.mode, unit: sm.unit, decimals: sm.decimals, note: sm.note,
+      };
+    };
+
+    if (q === '') {
+      const start = Math.max(0, store.count - MAX_RENDERED);
+      for (let i = store.count - 1; i >= start; i--) out.push(read(i));
+      return { visible: out, matched: store.count, truncated: store.count > MAX_RENDERED };
+    }
+
+    let scanned = 0;
+    for (let i = store.count - 1; i >= 0 && out.length < MAX_RENDERED; i--) {
+      scanned++;
+      const r = read(i);
+      const value = rowValue(r.value, r.unit, r.decimals);
+      if (
         r.mode.toLowerCase().includes(q) ||
         value.toLowerCase().includes(q) ||
         // Match either spelling: the operator may type "om" (what the meter sends and
         // what the CSV holds) or paste the symbol shown in the table.
         r.unit.toLowerCase().includes(q) ||
         displayUnit(r.unit).toLowerCase().includes(q) ||
-        note.toLowerCase().includes(q) ||
+        r.note.toLowerCase().includes(q) ||
         // LAST deliberately: this one allocates a Date per row, and every cheaper predicate
-        // short-circuits past it. Only a query that matches nothing else pays for the whole
-        // log — 86k rows after eight hours at this meter's rate.
-        rowIso(r).toLowerCase().includes(q)
-      );
-    });
-  }, [rows, query]);
+        // short-circuits past it.
+        rowIso(r.ts).toLowerCase().includes(q)
+      ) {
+        out.push(r);
+      }
+    }
+    // `truncated` here means "there may be older matches", which is true exactly when the
+    // scan stopped early rather than reaching the start of the store.
+    return { visible: out, matched: out.length, truncated: scanned < store.count };
+  }, [store, sampleVersion, query]);
 
-  // Render only the most recent MAX_RENDERED rows (newest are appended last), then
-  // show them newest-first: the latest measurement on top, oldest at the bottom.
-  // Take the window from the tail BEFORE reversing, and reverse a copy so `filtered`
-  // (which may alias the `rows` prop) is never mutated — the underlying dataset, the
-  // chart, stats, and CSV stay in chronological order.
-  const truncated = filtered.length > MAX_RENDERED;
-  const windowed = truncated ? filtered.slice(filtered.length - MAX_RENDERED) : filtered;
-  const visible = windowed.slice().reverse();
+  const hasQuery = query.trim() !== '';
 
   return (
     <>
@@ -108,7 +149,7 @@ export function DataLog({
           </div>
           <div className="flex items-center gap-7">
             <Meta label="Mode" value={liveMode} />
-            <Meta label="Samples" value={rows.length.toLocaleString('en')} />
+            <Meta label="Samples" value={store.count.toLocaleString('en')} />
             <span
               className={clsx(
                 'inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs font-bold uppercase tracking-wider',
@@ -130,7 +171,7 @@ export function DataLog({
             <div className="flex items-center gap-3">
               <h2 className="text-sm font-semibold text-fg">Recorded Measurements</h2>
               <span className="rounded-full border border-border bg-surface px-2.5 py-0.5 text-xs text-muted">
-                {rows.length.toLocaleString('en')} entries
+                {store.count.toLocaleString('en')} entries
               </span>
             </div>
             <div className="flex items-center gap-2.5">
@@ -145,7 +186,7 @@ export function DataLog({
               </div>
               <button
                 onClick={onExportCsv}
-                disabled={rows.length === 0}
+                disabled={store.count === 0}
                 className="flex items-center gap-2 rounded-md border border-border bg-surface px-3.5 py-2 text-xs font-semibold text-fg transition-colors hover:brightness-125 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <Download size={14} />
@@ -165,11 +206,11 @@ export function DataLog({
 
           {/* Rows */}
           <div className="min-h-0 flex-1 overflow-y-auto">
-            {rows.length === 0 ? (
+            {store.count === 0 ? (
               <div className="flex h-full items-center justify-center px-5 py-10 text-center text-sm text-muted">
                 No measurements recorded yet. Start logging to capture readings.
               </div>
-            ) : filtered.length === 0 ? (
+            ) : visible.length === 0 ? (
               <div className="flex h-full items-center justify-center px-5 py-10 text-center text-sm text-muted">
                 No rows match “{query}”.
               </div>
@@ -177,12 +218,24 @@ export function DataLog({
               <>
                 {truncated && (
                   <div className="border-b border-border bg-canvas/40 px-5 py-2 text-center text-[11px] text-muted">
-                    Showing latest {MAX_RENDERED.toLocaleString('en')} of{' '}
-                    {filtered.length.toLocaleString('en')} — export CSV for the full log
+                    {hasQuery
+                      ? `Showing latest ${visible.length.toLocaleString('en')} matches`
+                      : `Showing latest ${MAX_RENDERED.toLocaleString('en')} of ${matched.toLocaleString('en')}`}
+                    {' '}— export CSV for the full retained log
                   </div>
                 )}
                 {visible.map((row) => (
-                  <Row key={row.id} row={row} onNoteChange={onNoteChange} />
+                  <Row
+                    key={row.seq}
+                    seq={row.seq}
+                    ts={row.ts}
+                    value={row.value}
+                    mode={row.mode}
+                    unit={row.unit}
+                    decimals={row.decimals}
+                    note={row.note}
+                    onNoteChange={onNoteChange}
+                  />
                 ))}
               </>
             )}
@@ -210,7 +263,7 @@ export function DataLog({
                 icon={<Trash2 size={12} />}
                 label="Clear Log"
                 variant="danger"
-                disabled={rows.length === 0}
+                disabled={store.count === 0}
               />
             </div>
           </div>
@@ -225,33 +278,43 @@ export function DataLog({
   );
 }
 
-// Memoized so a note edit re-renders only its own row, and live-reading updates
-// (which don't change `rows`) skip all rows. Props are stable: `row` is a fresh
-// object only when that row changes; `onNoteChange` is a stable callback.
+// Memoized so a note edit re-renders only its own row, and a batch that did not change a
+// given row skips it entirely.
+//
+// The fields are passed as SEPARATE SCALAR PROPS, not as one object. `React.memo` compares
+// props with `Object.is` PER PROP and does not descend into objects, so handing it a record
+// rebuilt on every render — whether `store.at(i)` or a fresh literal assembled from it —
+// compares unequal every time and defeats the memo completely. Scalars compare by value, so
+// this actually bites: three times a second the store grows by a few samples and every
+// already-rendered row's props are identical, so none of them re-render.
 const Row = memo(function Row({
-  row,
+  seq,
+  ts,
+  value,
+  mode,
+  unit,
+  decimals,
+  note,
   onNoteChange,
-}: {
-  row: LoggedRow;
-  onNoteChange: (id: number, note: string) => void;
+}: RowData & {
+  onNoteChange: (seq: number, note: string) => void;
 }) {
-  const { id, reading: r, note } = row;
   return (
     <div className={clsx(GRID_COLS, 'items-center border-b border-border/60 px-5 transition-colors hover:bg-surface/40')}>
-      <div className="py-3 font-mono text-xs text-muted">{rowIso(r)}</div>
+      <div className="py-3 font-mono text-xs text-muted">{rowIso(ts)}</div>
       <div className="py-3">
         <span className="inline-block rounded border border-accent/25 bg-accent/10 px-2 py-0.5 text-[11px] font-semibold text-accent">
-          {MODE_LABELS[r.mode]}
+          {MODE_LABELS[mode]}
         </span>
       </div>
       <div className="py-3 text-right font-mono text-sm font-semibold tabular-nums text-fg">
-        {r.display}
+        {rowValue(value, unit, decimals)}
       </div>
-      <div className="py-3 pl-5 font-mono text-xs text-muted">{displayUnit(r.unit)}</div>
+      <div className="py-3 pl-5 font-mono text-xs text-muted">{displayUnit(unit)}</div>
       <div className="py-2 pr-3">
         <input
           value={note}
-          onChange={(e) => onNoteChange(id, e.target.value)}
+          onChange={(e) => onNoteChange(seq, e.target.value)}
           placeholder="Add a note…"
           className="w-full rounded-md border border-transparent bg-transparent px-2 py-1.5 text-xs text-fg outline-none transition-colors placeholder:text-muted hover:border-border focus:border-accent focus:bg-canvas"
         />
