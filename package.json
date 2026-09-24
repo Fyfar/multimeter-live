@@ -1,7 +1,10 @@
 {
   "name": "multimeter-live",
-  "version": "1.6.3",
+  "version": "1.7.1",
   "private": true,
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "description": "Real-time browser dashboard for the ZOYI ZT703s multimeter over the Web Serial API — live readings, trend chart, session stats, and CSV export. No backend.",
   "license": "MIT",
   "author": "Fyfar (https://github.com/Fyfar)",
@@ -26,23 +29,23 @@
     "dev": "next dev",
     "build": "next build && node scripts/finalize-pwa.mjs",
     "lint": "eslint",
-    "check": "node scripts/check-parser.mts && node scripts/check-settings.mts && node scripts/check-passfail.mts && node scripts/check-csv.mts"
+    "check": "node scripts/check-parser.mts && node scripts/check-settings.mts && node scripts/check-passfail.mts && node scripts/check-csv.mts && node scripts/check-search.mts && node scripts/check-samples.mts && node scripts/check-tier.mts"
   },
   "dependencies": {
     "chart.js": "^4.5.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.20.0",
-    "next": "16.2.7",
-    "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "lucide-react": "^1.48.0",
+    "next": "16.3.6",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.1",
-    "@types/node": "^20",
+    "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.7",
+    "eslint-config-next": "16.3.6",
     "tailwindcss": "^4.3.1",
     "typescript": "^5"
   }

@@ -54,64 +54,19 @@ export type TimeWindow = { min?: number; max?: number; stepSize?: number };
  * the two arms of one `max()`, so the handover is continuous: at elapsed === windowMs
  * both arms give the same span, with no jump to hide.
  *
- * The anchor is the SESSION start, never the oldest buffered point. The buffer is trimmed,
- * so its oldest point describes retention, not the session. It did once diverge outright:
+ * The anchor is the SESSION start, never the oldest stored sample. The store is trimmed,
+ * so its oldest sample describes retention, not the session. It did once diverge outright:
  * a 3600-sample cap held only 20 minutes at 3 samples/second, so the oldest point at '1h'
  * was permanently newer than `now - 1h` and the window would have stayed in its filling
  * phase forever, with a dead band on the right that never closed. Retention is stated in
- * time now (BUFFER_RETENTION_MS) and the two agree — keep them separate anyway, so that
- * changing retention cannot silently move the anchor.
+ * time now (RETENTION_MS in lib/samples.ts) and is seven days, far longer than any bounded
+ * window — keep the two separate anyway, so that changing retention cannot silently move
+ * the anchor.
  *
  * 'all' has no fixed duration to pin to, so it returns nothing set and the axis fits the
  * data. It is the one range whose scale is not constant, which is inherent: an unbounded
  * span in a fixed width has no constant scale.
  */
-/**
- * How much history the chart buffer keeps while a bounded range is active: the longest
- * bounded window, so every bounded view is complete by construction and none can be short
- * of data through trimming.
- *
- * Derived from TIME_RANGE_MS rather than written as a literal. The bug this replaces was a
- * sample COUNT (3600) sized on an assumed ~1 sample/second; the meter delivers 3, so it
- * retained 20 minutes and the '1h' view could never be whole. A count cannot know the packet
- * rate. Deriving the span also means adding a range cannot desynchronize retention from what
- * the views need — though it does make adding a long range a memory decision.
- */
-export const BUFFER_RETENTION_MS: number = Math.max(
-  ...Object.values(TIME_RANGE_MS).filter((ms) => Number.isFinite(ms)),
-);
-
-/**
- * Index of the first point at or after `fromX`, by binary search. The chart buffer is
- * appended in timestamp order, so the visible window is a tail slice and finding where it
- * starts costs O(log n) instead of a scan — and, since the buffer is already in the chart's
- * shape, the slice IS the dataset rather than a per-sample rebuild of it.
- *
- * Returns `points.length` when every point is older than `fromX` (an empty window).
- *
- * Assumes `points` is sorted by `x`, which the chart buffer is: it is appended in arrival
- * order. `normalized: true` and the decimation plugin already assume the same, so this is
- * not a new requirement. Duplicate timestamps are fine and expected — a batch parsed inside
- * one millisecond stamps several readings identically — and the first of the run is
- * returned, which is the correct edge for trimming.
- *
- * A backwards clock step breaks the assumption for as long as the jump lasts. A sub-second
- * NTP slew puts the window edge off by a sample or two. A LARGE backwards step is worse than
- * that: the search runs on unsorted data, converges to 0, and nothing is trimmed, so the
- * chart buffer grows unbounded until the clock catches up. It cannot throw and cannot corrupt
- * anything — it is memory growth that self-heals.
- */
-export function firstIndexInWindow(points: readonly { x: number }[], fromX: number): number {
-  let lo = 0;
-  let hi = points.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (points[mid].x < fromX) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
 /**
  * Tick positions for the time axis: multiples of `step` away from `now`, clipped to
  * [`min`, `max`].

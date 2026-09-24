@@ -19,7 +19,7 @@ const {
   loadSettings, saveSettings, DEFAULT_SETTINGS,
   loadPortRecord, savePortRecord, clearPortRecord,
   TIME_RANGES, TIME_RANGE_MS, TIME_RANGE_STEP_MS, resolveTimeWindow,
-  firstIndexInWindow, timeAxisTicks, BUFFER_RETENTION_MS,
+  timeAxisTicks,
 } = await import('../lib/settings.ts');
 const KEY = 'multimeter-live:settings';
 let checks = 0;
@@ -246,29 +246,6 @@ for (const range of TIME_RANGES.filter((r) => r !== 'all')) {
   checks += 5;
 }
 
-// --- firstIndexInWindow: where the visible slice starts -------------------------
-// Off-by-one here silently drops or keeps one sample at the window edge, which is
-// invisible on screen and wrong in the y-axis floor.
-{
-  const pts = [10, 20, 30, 40, 50].map((x) => ({ x }));
-  assert.equal(firstIndexInWindow([], 30), 0, 'empty buffer -> 0');
-  assert.equal(firstIndexInWindow(pts, 5), 0, 'everything in window -> 0');
-  assert.equal(firstIndexInWindow(pts, 99), 5, 'nothing in window -> length');
-  assert.equal(firstIndexInWindow(pts, 30), 2, 'a boundary hit is INSIDE the window');
-  assert.equal(firstIndexInWindow(pts, 31), 3, 'just past a point excludes it');
-  assert.equal(firstIndexInWindow([{ x: 10 }], 10), 0, 'single point, at the boundary');
-  assert.equal(firstIndexInWindow([{ x: 10 }], 11), 1, 'single point, out of window');
-  // Duplicate timestamps are the normal case, not an exotic one: the parser stamps
-  // Date.now() per reading, so a batch parsed inside one millisecond stamps several
-  // identically. The FIRST of the run is the correct edge — returning the last would
-  // silently drop the points whose ts equals the cutoff exactly.
-  assert.equal(firstIndexInWindow([10, 10, 10, 20].map((x) => ({ x })), 10), 0,
-    'a run of equal timestamps returns the first of the run');
-  assert.equal(firstIndexInWindow([10, 10, 10, 20].map((x) => ({ x })), 20), 3,
-    'and the first index past the run when the cutoff moves on');
-  checks += 9;
-}
-
 // --- timeAxisTicks: 'Now' must be a tick in BOTH phases -------------------------
 // The bug this replaced: ticks generated from the axis minimum are aligned with the
 // present only once the window has filled, so a young session's '1h' view had no 'Now'
@@ -307,18 +284,5 @@ assert.deepEqual(timeAxisTicks(NOW - 1000, Infinity, 1000, NOW), [], 'a non-fini
 assert.deepEqual(timeAxisTicks(-Infinity, NOW, 1000, NOW), [], 'a non-finite min yields no ticks');
 checks += 4;
 
-// --- BUFFER_RETENTION_MS: the chart keeps the longest bounded window ------------
-// Derived, not written down, so a new range cannot leave the buffer short of what that
-// range needs — the failure the 3600-sample cap produced.
-{
-  const bounded = TIME_RANGES.filter((r) => r !== 'all').map((r) => TIME_RANGE_MS[r]);
-  // This one assertion is load-bearing and sufficient. It fails if 'all' Infinity leaks in,
-  // if the value regresses to a literal, and if a new range outgrows retention. Asserting
-  // `isFinite`, or that every bounded window fits, adds nothing: both are consequences of
-  // this equality and cannot fail once it holds (docs/quality.md — a check that cannot fail
-  // is worse than none).
-  assert.equal(BUFFER_RETENTION_MS, Math.max(...bounded), 'retention is the longest window');
-  checks++;
-}
 
 console.log(`check-settings: ${checks} assertions passed`);
