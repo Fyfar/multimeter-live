@@ -63,7 +63,7 @@ const RE_NON_NUM = /[^0-9.+-]/g;
 
 // Scale every unit to a canonical base so a mid-stream unit switch (mV -> V)
 // does not make the chart jump. The digital readout still shows the raw unit.
-const SCALE: Record<string, { base: string; factor: number }> = {
+export const SCALE: Record<string, { base: string; factor: number }> = {
   V: { base: 'V', factor: 1 },
   mV: { base: 'V', factor: 1e-3 },
   A: { base: 'A', factor: 1 },
