@@ -17,8 +17,8 @@ export type Mode =
 
 // Human-readable label for each mode (shared by DigitalDisplay + DataLog).
 export const MODE_LABELS: Record<Mode, string> = {
-  VOLTAGE: 'DC Voltage',
-  CURRENT: 'DC Current',
+  VOLTAGE: 'Voltage',
+  CURRENT: 'Current',
   RESISTANCE: 'Resistance',
   CONTINUITY: 'Continuity',
   DIODE: 'Diode',
