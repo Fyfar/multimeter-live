@@ -1,11 +1,13 @@
 # Multimeter·Live
 
 Real-time dashboard for the **ZOYI ZT703s** multimeter, running entirely in the
-browser. Connect the meter over the Web Serial API and you get a large digital
-readout, a rolling trend chart, session logging with running statistics, CSV export,
-and a Pass/Fail view for sorting components against a reference. There is no backend
-and nothing to install.
+browser. Connect the meter over the Web Serial API and watch the readout, trend and
+distribution of your measurements live, log them for up to a week, and export them to
+CSV. There is no backend and nothing to install.
 
+[![Build](https://img.shields.io/github/actions/workflow/status/Fyfar/multimeter-live/deploy.yml?branch=main&label=build)](https://github.com/Fyfar/multimeter-live/actions/workflows/deploy.yml)
+[![Version](https://img.shields.io/github/package-json/v/Fyfar/multimeter-live?label=version&color=3b82f6)](https://github.com/Fyfar/multimeter-live/blob/main/package.json)
+[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)](./LICENSE)
 ![Stack: Next.js · React · TypeScript · Tailwind · Chart.js](https://img.shields.io/badge/stack-Next.js%2016%20·%20React%2019%20·%20TypeScript%20·%20Tailwind%20v4-3b82f6)
 
 ![Multimeter·Live dashboard with the live digital readout, trend chart, and session statistics](./images/dashboard.png)
@@ -46,34 +48,31 @@ browser will also ask before the page goes away. You never reinstall to update.
 > the hardware this tool works with.
 
 > **Device support:** Built specifically for the **ZOYI ZT703s** and its serial
-> packet format. The **ZT703s+** and **ZT706** likely use the same protocol and may
-> work, but they are **untested**. Other multimeters are not supported.
+> packet format, tested on firmware **1.6.27**. The **ZT703s+** and **ZT706** likely
+> use the same protocol and may work, but they are **untested**. Other multimeters are
+> not supported.
 
 ## Features
 
-- **Live digital readout** of the current measurement, mode, unit, and resolution
-- **Rolling trend chart** with selectable time windows: 10 s, 1 m, 10 m, 1 h, or
-  **all**, which plots the entire session
-- **Session logging** with running statistics: average, min, max, peak-to-peak,
-  sample count, and standard deviation
-- **Pass/Fail component testing** against a reference and tolerance, with a verdict
-  per part and its own CSV export. See below.
-- **Trigger auto-logging**. Arm a threshold and recording starts by itself when the
-  measured magnitude crosses it, then stops once it falls back below. The release
-  point sits under the arm point, so a signal hovering at the edge does not flap
-  logging on and off.
-- **Auto-reconnect** to the last adapter you used, on reload and on reopening the tab.
-  The port is chosen by which one actually sends readings, not by position in the list,
-  because a USB-serial adapter can appear more than once and the entries are not
-  otherwise distinguishable.
-- **Auto-scale or manual Y-axis range**, with out-of-range samples flagged on the chart
-- **CSV export** of the recorded session (timestamp, mode, value, unit)
-- **Settings** for stability sampling, trigger hysteresis, what survives a mode change,
-  the capacitance no-part floor, and the audible alerts
-- **Configurable baud rate** (9600 to 115200)
+- **Live readout and trend chart.** A large digital display with mode, unit and
+  resolution, next to a rolling chart with 10 s, 1 m, 10 m, 1 h or whole-session windows.
+- **Histogram view** of how your readings are distributed, binned to the meter's own
+  resolution. Handy for seeing noise, drift, or how tightly a batch of parts clusters.
+- **Continuous logging for up to 7 days.** Leave a session running and it keeps every
+  sample for a full week, with running statistics (average, min, max, peak-to-peak,
+  standard deviation) over the whole run.
+- **Searchable data log** with a note field on every row, and **CSV export** of the
+  session.
+- **Pass/Fail component testing.** Set a reference and tolerance, touch parts one after
+  another, and get a beep and a verdict for each. See below.
+- **Smart capture.** Log only stable values, or arm a trigger threshold so recording
+  starts and stops by itself as the signal crosses it.
+- **Installable and offline.** A PWA that reconnects to your last adapter on its own and
+  needs no network once loaded.
 
-Measurements themselves are not restored across a reload. The connection and your view
-come back, but the table starts empty, which is deliberate rather than an oversight.
+A week of samples lives in the open tab's memory, so it survives as long as the tab does:
+the connection and your view come back after a reload, but the recorded data does not.
+That is deliberate, not an oversight. Export a CSV before you close it.
 
 ## Pass/Fail component testing
 
@@ -89,6 +88,18 @@ where one part ends and the next begins. A part that reads as a dead short is re
 as "no part connected" rather than as a failure, so Pass/Fail finds out-of-tolerance
 parts rather than shorts. Meter accuracy is not modelled, though the app warns you if
 your tolerance band is narrower than the meter can resolve.
+
+## Limitations
+
+The meter can measure both DC and AC voltage and current, and shows frequency for AC
+signals on its own display. It does **not** send any of that over UART. The serial
+stream carries only the value and its unit (V, mV, A, mA), the same for DC and AC, so
+the app cannot tell the two apart. Voltage and current are therefore shown simply as
+"Voltage" and "Current", and there is no frequency data anywhere in the app. Read
+frequency, and check whether you are measuring DC or AC, on the meter itself.
+
+Tested on a ZT703s with firmware 1.6.27. Other firmware versions may send different
+data.
 
 ## Requirements
 

@@ -11,6 +11,7 @@ import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { DataLog } from '@/components/DataLog';
 import { Settings } from '@/components/Settings';
 import { NoDataWarning } from '@/components/NoDataWarning';
+import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { PassFail } from '@/components/PassFail';
 import {
   SCALE, displayDecimals, displayUnit, normalizeReading, readingResolution,
@@ -393,6 +394,15 @@ export default function Home() {
     setSampleVersion((v) => v + 1);
     resetSessionDerived();
   }, [resetSessionDerived, store]);
+
+  // Clear Data / Clear Log only ask; the flush happens on confirm.
+  const [confirmClear, setConfirmClear] = useState(false);
+  const requestClear = useCallback(() => setConfirmClear(true), []);
+  const cancelClear = useCallback(() => setConfirmClear(false), []);
+  const confirmFlush = useCallback(() => {
+    flushSession();
+    setConfirmClear(false);
+  }, [flushSession]);
 
   const handleReadings = useCallback(
     (readings: Reading[]) => {
@@ -991,7 +1001,7 @@ export default function Home() {
               canRecord={status === 'connected'}
               stableOnly={stableOnly}
               onStableOnlyChange={handleStableOnlyChange}
-              onClear={flushSession}
+              onClear={requestClear}
             canClear={sampleCount > 0}
               onExportCsv={exportCsv}
               canExport={canExport}
@@ -1009,7 +1019,7 @@ export default function Home() {
             canRecord={status === 'connected'}
             onExportCsv={exportCsv}
             onToggleRecord={handleToggleRecord}
-            onClear={flushSession}
+            onClear={requestClear}
             onNoteChange={handleNoteChange}
           />
         ) : view === 'pass-fail' ? (
@@ -1058,6 +1068,22 @@ export default function Home() {
 
       {/* Connected-but-no-data warning — overlays every view; informational only. */}
       {overlayVisible && <NoDataWarning onDismiss={() => setNoDataDismissed(true)} />}
+      {confirmClear && (
+        <ConfirmDialog
+          title="Clear all recorded data?"
+          body={
+            <p>
+              This permanently removes{' '}
+              <strong className="text-fg">{sampleCount.toLocaleString()} recorded samples</strong>{' '}
+              from the chart, statistics and Data Log. It cannot be undone. Export a CSV first
+              if you need them.
+            </p>
+          }
+          confirmLabel="Clear data"
+          onConfirm={confirmFlush}
+          onCancel={cancelClear}
+        />
+      )}
     </div>
   );
 }
