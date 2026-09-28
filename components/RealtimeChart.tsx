@@ -21,7 +21,8 @@ import {
   type ChartConfiguration,
   type Scale,
 } from 'chart.js';
-import { resolutionDecimals, STABLE_LSD_TOLERANCE } from '@/lib/parser';
+import { displayUnit, resolutionDecimals, STABLE_LSD_TOLERANCE } from '@/lib/parser';
+import { physicalUnitLabel, siPrefixOf, toPhysicalUnit } from '@/lib/si';
 import type { SampleStore } from '@/lib/samples';
 import {
   DEFAULT_COLUMNS, RenderTier, quantizeAnchor, windowBucketMs, type TierPoint,
@@ -233,6 +234,7 @@ function buildChartConfig(
   unit: string,
   nowRef: { current: number },
   unitRef: { current: string },
+  binWidthRef: { current: number | undefined },
 ): ChartConfiguration {
   if (isHistogram) {
     return {
@@ -258,7 +260,7 @@ function buildChartConfig(
         interaction: { intersect: false, mode: 'index' },
         scales: {
           x: {
-            title: { display: true, text: unit, color: AXIS_COLOR, font: { size: 11 } },
+            title: { display: true, text: displayUnit(unit), color: AXIS_COLOR, font: { size: 11 } },
             ticks: { color: AXIS_COLOR, maxTicksLimit: 9, maxRotation: 0, minRotation: 0, font: MONO_FONT },
             grid: { color: GRID_COLOR },
             border: { color: GRID_COLOR },
@@ -413,10 +415,29 @@ function buildChartConfig(
           ticks: {
             color: AXIS_COLOR,
             font: MONO_FONT,
-            callback(this: { getLabelForValue: (v: number) => string }, value: string | number) {
-              const label = this.getLabelForValue(Number(value));
-              const u = unitRef.current;
-              return u ? `${label} ${u}` : label;
+            // One shared SI prefix per redraw, chosen from the visible extent (never from
+            // an individual tick's own rounded value — see design.md's no-rounding rule)
+            // and decimals from `binWidth`, the same resolution source StatisticsPanel
+            // uses, so the chart's precision matches the panel next to it.
+            callback(
+              this: { getLabelForValue: (v: number) => string; min: number; max: number },
+              value: string | number,
+            ) {
+              const baseUnit = unitRef.current;
+              // No unit yet (nothing has arrived this session) -> the plain, unscaled
+              // label, matching the pre-SI-prefix behavior exactly. Without this, a saved
+              // manual y-range from a prior session could show a bare prefix letter with
+              // nothing to attach it to (e.g. "1.000 M") before any real reading arrives.
+              if (!baseUnit) return this.getLabelForValue(Number(value));
+              const extent = toPhysicalUnit(baseUnit, Math.max(Math.abs(this.min), Math.abs(this.max)));
+              const prefix = siPrefixOf(extent);
+              const scale = Math.pow(10, prefix.exp);
+              const bw = binWidthRef.current;
+              const decimals =
+                bw === undefined ? 3 : resolutionDecimals(toPhysicalUnit(baseUnit, bw) / scale);
+              const text = (toPhysicalUnit(baseUnit, Number(value)) / scale).toFixed(decimals);
+              const unitLabel = `${prefix.symbol}${physicalUnitLabel(baseUnit)}`;
+              return unitLabel ? `${text} ${unitLabel}` : text;
             },
           },
           grid: { color: GRID_COLOR },
@@ -513,6 +534,10 @@ export function RealtimeChart({
   // from the initializer so the very first draw has it, then written by the update effect —
   // never during render, which lint enforces.
   const unitRef = useRef(unit);
+  // The y-axis's resolution source, mirrored into a ref for the same reason `unitRef` is:
+  // the tick callback closes over this once, at chart creation, and the chart is only
+  // re-created on `chartType`.
+  const binWidthRef = useRef(binWidth);
   const [chartType, setChartType] = useState<ChartType>('line');
   // No canvas is mounted while this is true, so the create effect must re-run when it
   // clears — hence its presence in that effect's dependency list.
@@ -529,7 +554,10 @@ export function RealtimeChart({
   useEffect(() => {
     if (lineUnavailable || !canvasRef.current) return;
     nowRef.current = Date.now();
-    const chart = new Chart(canvasRef.current, buildChartConfig(chartType === 'histogram', unit, nowRef, unitRef));
+    const chart = new Chart(
+      canvasRef.current,
+      buildChartConfig(chartType === 'histogram', unit, nowRef, unitRef, binWidthRef),
+    );
     chartRef.current = chart;
     return () => {
       chart.destroy();
@@ -541,9 +569,13 @@ export function RealtimeChart({
   /* eslint-disable react-hooks/immutability */
   useEffect(() => {
     const chart = chartRef.current;
+    // Written unconditionally, even when the bail-out below fires: keeps both refs live
+    // for whenever the chart next exists, rather than relying on "no chart is ever live
+    // while lineUnavailable" to hold forever.
+    unitRef.current = unit;
+    binWidthRef.current = binWidth;
     if (!chart || lineUnavailable) return;
 
-    unitRef.current = unit;
     if (chartType === 'histogram') {
       // Counts per distinct value, accumulated as entries are recorded — NOT a re-bin of
       // the stored samples, which is what keeps a multi-day distribution affordable. Fed by
@@ -567,7 +599,7 @@ export function RealtimeChart({
         yScale.max = undefined;
       }
       const xScale = chart.options.scales?.x as { title?: { text?: string } } | undefined;
-      if (xScale?.title) xScale.title.text = unit;
+      if (xScale?.title) xScale.title.text = displayUnit(unit);
 
       chart.update('none');
       return;
