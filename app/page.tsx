@@ -15,7 +15,7 @@ import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { PassFail } from '@/components/PassFail';
 import {
   SCALE, displayDecimals, displayUnit, normalizeReading, readingResolution,
-  resolutionDecimals, withinStableBand, type Mode, type Reading,
+  withinStableBand, type Mode, type Reading,
 } from '@/lib/parser';
 import { RETENTION_MS, SampleStore } from '@/lib/samples';
 import {
@@ -114,6 +114,10 @@ export default function Home() {
   // later would silently break the anchor instead of failing loudly.
   const [sessionStart, setSessionStart] = useState<number | null>(null);
   const [chartUnit, setChartUnit] = useState('');
+  // The raw SCALE token behind `chartUnit` ('OM'/'V'/'A'/'nF') — StatisticsPanel and the
+  // chart's y-axis need this, not the display string, so each value/tick can pick its own
+  // SI prefix and apply the capacitance nF->F correction themselves (lib/si.ts).
+  const [chartBaseUnit, setChartBaseUnit] = useState('');
   const [rangeMin, setRangeMin] = useState(DEFAULT_SETTINGS.rangeMin);
   const [rangeMax, setRangeMax] = useState(DEFAULT_SETTINGS.rangeMax);
   const [autoScale, setAutoScale] = useState(DEFAULT_SETTINGS.autoScale);
@@ -456,9 +460,11 @@ export default function Home() {
           const wasInitialized = modeRef.current !== null;
           modeRef.current = r.mode;
           unitRef.current = baseUnit;
-          // Display-only conversion: chartUnit feeds the chart axis, statistics, trigger
-          // label and log summary, and nothing else. The raw token stays on the Reading.
+          // Display-only conversion: chartUnit feeds the trigger label; chartBaseUnit feeds
+          // the chart axis and statistics, which each derive their own display/SI prefix
+          // from the raw token. Neither touches the Reading's own raw unit.
           setChartUnit(displayUnit(baseUnit));
+          setChartBaseUnit(baseUnit);
           // Keep the recorded log across a real mode change if opted in (chart/stats are
           // single-unit and always reset). The first detection has no prior data, so a
           // full flush is equivalent. Old-unit rows stay valid in their original unit.
@@ -606,6 +612,7 @@ export default function Home() {
                 toleranceValue: pfToleranceValueRef.current!,
                 verdict: judge(baseValue, baseReference, baseBand),
                 deviation: baseValue - baseReference,
+                resolution: lsd,
               });
             }
           }
@@ -782,10 +789,16 @@ export default function Home() {
 
   // Clears only the verdict batch — the Data Log's recorded rows are untouched, and
   // the reference/tolerance are kept (the operator is usually still on the same part).
+  //
+  // Deliberately does NOT touch `pfLastCapturedRef`: that guard is what stops a held
+  // part from being captured twice, and it already re-arms itself on a genuine probe
+  // lift (baseValue null/no-part, above). Resetting it here too used to re-capture
+  // (and re-beep) the SAME still-connected part the instant Clear Batch was pressed —
+  // audible even after navigating away, since capture runs independent of which view
+  // is open. Clear Batch is a table boundary, not a probe-lift.
   const clearPassFail = useCallback(() => {
     passFailRowsRef.current = [];
     pfRowIdRef.current = 0;
-    pfLastCapturedRef.current = null;
     setPassFailRows([]);
   }, []);
 
@@ -888,8 +901,8 @@ export default function Home() {
   // `sampleCount`: after a preserve-log mode change the store still holds the previous
   // unit's rows while `recordedResolution` and `dominantValue` have just been nulled, so
   // gating on the store would resolve both to `undefined` and silently switch the histogram
-  // off the LSD grid, switch off the ±20 LSD y-axis floor, and drop statDecimals to a
-  // 3-decimal fallback in both panels.
+  // off the LSD grid, switch off the ±20 LSD y-axis floor, and drop the Statistics panels'
+  // resolution-derived decimals to their 3-decimal fallback.
   const chartCount = Math.max(0, store.count - (chartFromSeq - store.firstSeq));
   const binWidth =
     chartCount > 0
@@ -901,8 +914,6 @@ export default function Home() {
     chartCount > 0
       ? (dominantValue ?? undefined)
       : (liveNumeric ? (normalizeReading(liveNumeric).baseValue ?? undefined) : undefined);
-  // Measurement resolution as decimal places (1 Ω → 0, 0.0001 V → 4) for stat formatting.
-  const statDecimals = binWidth !== undefined ? resolutionDecimals(binWidth) : undefined;
 
   return (
     <div className="flex h-full flex-col bg-canvas">
@@ -969,7 +980,7 @@ export default function Home() {
                   counts={rawCounts}
                   stableOnly={stableOnly}
                   sessionStart={sessionStart}
-                  unit={chartUnit}
+                  unit={chartBaseUnit}
                   yMin={effectiveYMin}
                   yMax={effectiveYMax}
                   timeRange={timeRange}
@@ -977,7 +988,7 @@ export default function Home() {
                   binWidth={binWidth}
                   centerValue={centerValue}
                 />
-                <StatisticsPanel stats={sessionStats} unit={chartUnit} decimals={statDecimals} />
+                <StatisticsPanel stats={sessionStats} baseUnit={chartBaseUnit} resolution={binWidth} />
               </div>
             </main>
 
@@ -1014,8 +1025,8 @@ export default function Home() {
             store={store}
             sampleVersion={sampleVersion}
             stats={sessionStats}
-            unit={chartUnit}
-            decimals={statDecimals}
+            baseUnit={chartBaseUnit}
+            resolution={binWidth}
             canRecord={status === 'connected'}
             onExportCsv={exportCsv}
             onToggleRecord={handleToggleRecord}

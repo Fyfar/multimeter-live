@@ -4,6 +4,7 @@
 // is nF — keeping the two apart is what lets the operator type `22m` and not do maths.
 
 import type { Mode } from '@/lib/parser';
+import { siPrefixOf } from './si.ts';
 
 // ---------------------------------------------------------------- SI value parsing
 
@@ -99,28 +100,9 @@ export function entryToBase(mode: SupportedMode, entryValue: number): number {
 
 // ------------------------------------------------------------------- formatting
 
-const PREFIXES: { exp: number; symbol: string }[] = [
-  { exp: 9, symbol: 'G' },
-  { exp: 6, symbol: 'M' },
-  { exp: 3, symbol: 'k' },
-  { exp: 0, symbol: '' },
-  { exp: -3, symbol: 'm' },
-  { exp: -6, symbol: 'µ' },
-  { exp: -9, symbol: 'n' },
-  { exp: -12, symbol: 'p' },
-];
-
 /** Render a value in its entry unit with the conventional SI prefix ("100 nF", "22 mF",
  *  "4.7 kΩ"). The echo under the reference field: typing `100` in Capacitance shows
  *  "100 F", which is self-evidently not a capacitor. */
-export function siPrefixOf(value: number | null): { exp: number; symbol: string } {
-  if (value === null || !Number.isFinite(value) || value === 0) {
-    return { exp: 0, symbol: '' };
-  }
-  const abs = Math.abs(value);
-  return PREFIXES.find((p) => abs >= Math.pow(10, p.exp)) ?? PREFIXES[PREFIXES.length - 1];
-}
-
 export function formatEntryValue(value: number, unitLabel: string): string {
   if (!Number.isFinite(value)) return `— ${unitLabel}`;
   if (value === 0) return `0 ${unitLabel}`;
@@ -248,4 +230,8 @@ export interface VerdictRow {
   verdict: Verdict;
   /** Signed measured − reference, in the internal base unit. */
   deviation: number;
+  /** The reading's own LSD at capture (internal base unit), null if unknown. Lets the
+   *  Measured Spread panel show the batch's real demonstrated resolution instead of a
+   *  flat fallback — see `StatisticsPanel`'s `resolution` prop. */
+  resolution: number | null;
 }

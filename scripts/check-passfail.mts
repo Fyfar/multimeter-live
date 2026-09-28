@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   parseSiValue, entryToBase, ENTRY_UNITS, formatEntryValue, isPlausibleReference,
   isSupportedMode, resolveBand, isBandTooWide, judge, SUPPORTED_MODES,
-  parseSiEntry, siPrefixOf, resolveAbsoluteTolerance,
+  parseSiEntry, resolveAbsoluteTolerance,
 } from '../lib/passfail.ts';
 
 let checks = 0;
@@ -116,15 +116,6 @@ eq(parseSiEntry('30')?.explicit, false, 'a bare number has no explicit suffix');
 eq(parseSiEntry('30p')?.explicit, true, 'a suffixed number is explicit');
 eq(parseSiEntry('4k7')?.explicit, true, 'infix counts as explicit');
 eq(parseSiEntry('bad'), null, 'unparseable returns null');
-
-// --- SI range of a value ------------------------------------------------------------
-eq(siPrefixOf(3e-10).symbol, 'p', '300p sits in the pico range');
-eq(siPrefixOf(1e-7).symbol, 'n', '100n sits in the nano range');
-eq(siPrefixOf(0.022).symbol, 'm', '22m sits in the milli range');
-eq(siPrefixOf(4700).symbol, 'k', '4.7k sits in the kilo range');
-eq(siPrefixOf(100).symbol, '', '100 sits in the unprefixed range');
-eq(siPrefixOf(null).symbol, '', 'no value -> no prefix');
-eq(siPrefixOf(0).symbol, '', 'zero -> no prefix');
 
 // --- absolute tolerance inherits the reference's range --------------------------------
 // The headline case: reference 300p, tolerance "30" means 30 pF, not 30 F.

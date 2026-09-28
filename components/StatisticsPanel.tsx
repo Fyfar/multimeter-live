@@ -1,26 +1,27 @@
 'use client';
 
 import { clsx } from 'clsx';
-
-function fmt(v: number, decimals: number): string {
-  return v.toFixed(decimals);
-}
+import { formatSiValue } from '@/lib/si';
 
 export type SessionStats = { count: number; mean: number; m2: number; min: number; max: number };
 
 export function StatisticsPanel({
   stats,
-  unit,
-  decimals,
+  baseUnit,
+  resolution,
   layout = 'grid',
   title = 'Statistics',
   bare = false,
 }: {
   stats: SessionStats | null;
-  unit: string;
-  // Measurement resolution in decimal places (e.g. 0 for 1 Ω, 4 for 0.0001 V).
-  // Undefined when the device resolution isn't known → fall back to 3 dp.
-  decimals?: number;
+  // Raw SCALE base unit token ('OM'/'V'/'A'/'nF' — see lib/parser.ts), NOT the
+  // display-converted string. Each entry picks its own SI prefix and composes its own
+  // suffix from this (lib/si.ts), so a 11.13 MΩ average can sit next to a 21.00 kΩ
+  // peak-to-peak without forcing one shared scale.
+  baseUnit: string;
+  // Measurement resolution, in the SAME base unit as `stats` (e.g. 1 for 1 Ω, 0.0001 for
+  // 0.0001 V). Undefined when the device resolution isn't known → 3 dp fallback.
+  resolution?: number;
   // 'grid' (default) = the Dashboard's 3/6-col layout; 'stack' = single column for
   // the narrow Data Log sidebar. Both render the same entries/formatting.
   layout?: 'grid' | 'stack';
@@ -37,18 +38,21 @@ export function StatisticsPanel({
   const peakToPeak = max - min;
   const stdDev = isEmpty || stats.count < 2 ? 0 : Math.sqrt(stats.m2 / stats.count);
 
-  // Min/Max/P2P are real device-grid values → snap to the measurement resolution.
-  // Average/Std-Dev resolve below 1 LSD by averaging noise → keep 2 extra decimals.
-  const baseDp = decimals ?? 3;
-  const aggDp = decimals !== undefined ? decimals + 2 : 3;
+  // Min/Max/P2P are real device-grid values → the resolution's own decimal count.
+  // Average/Std-Dev resolve below 1 LSD by averaging noise → 2 extra decimals.
+  const row = (v: number, extraDecimals: number) => {
+    if (isEmpty) return { value: '—', sub: undefined };
+    const { text, unit } = formatSiValue(baseUnit, v, resolution, extraDecimals);
+    return { value: text, sub: unit };
+  };
 
   const entries: { label: string; value: string; sub?: string; color: string }[] = [
-    { label: 'Average', value: isEmpty ? '—' : fmt(avg, aggDp), sub: unit, color: 'text-fg' },
-    { label: 'Minimum', value: isEmpty ? '—' : fmt(min, baseDp), sub: unit, color: 'text-success' },
-    { label: 'Maximum', value: isEmpty ? '—' : fmt(max, baseDp), sub: unit, color: 'text-danger' },
-    { label: 'Peak to Peak', value: isEmpty ? '—' : fmt(peakToPeak, baseDp), sub: unit, color: 'text-fg' },
+    { label: 'Average', ...row(avg, 2), color: 'text-fg' },
+    { label: 'Minimum', ...row(min, 0), color: 'text-success' },
+    { label: 'Maximum', ...row(max, 0), color: 'text-danger' },
+    { label: 'Peak to Peak', ...row(peakToPeak, 0), color: 'text-fg' },
     { label: 'Samples', value: isEmpty ? '—' : stats.count.toLocaleString('en'), color: 'text-fg' },
-    { label: 'Std Deviation', value: isEmpty ? '—' : fmt(stdDev, aggDp), sub: unit, color: 'text-fg' },
+    { label: 'Std Deviation', ...row(stdDev, 2), color: 'text-fg' },
   ];
 
   const isStack = layout === 'stack';

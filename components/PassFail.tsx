@@ -5,12 +5,13 @@ import { AlertTriangle, Download, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { ActionButton } from '@/components/Controls';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
-import { normalizeReading, readingResolution, type Reading, displayUnit } from '@/lib/parser';
+import { normalizeReading, readingResolution, type Reading } from '@/lib/parser';
 import {
   ENTRY_UNITS, entryToBase, formatEntryValue, isBandTooWide, isPlausibleReference,
-  judge, parseSiValue, resolveAbsoluteTolerance, resolveBand, siPrefixOf,
+  judge, parseSiValue, resolveAbsoluteTolerance, resolveBand,
   type SupportedMode, type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
+import { siPrefixOf } from '@/lib/si';
 
 // Same windowing rationale as DataLog: keep every row in memory and in the CSV, but
 // cap what is painted into the DOM.
@@ -175,6 +176,10 @@ export function PassFail({
   const summary = useMemo(() => {
     if (rows.length === 0) return null;
     let mean = 0, m2 = 0, min = Infinity, max = -Infinity, count = 0, passed = 0;
+    // Coarsest LSD across the CAPTURED rows (not every live reading) — same "coarsest
+    // seen" idea as page.tsx's recordedResolutionRef, scoped to this batch so it clears
+    // with Clear Batch instead of needing its own reset.
+    let resolution: number | null = null;
     for (const r of rows) {
       count += 1;
       if (r.verdict === 'PASS') passed += 1;
@@ -183,9 +188,10 @@ export function PassFail({
       m2 += delta * (r.baseValue - mean);
       if (r.baseValue < min) min = r.baseValue;
       if (r.baseValue > max) max = r.baseValue;
+      if (r.resolution !== null) resolution = Math.max(resolution ?? 0, r.resolution);
     }
     return { stats: { count, mean, m2, min, max }, passed, failed: count - passed,
-             yieldPct: (passed / count) * 100 };
+             yieldPct: (passed / count) * 100, resolution };
   }, [rows]);
 
   // Memoized for the same reason: a fresh 500-element array per batch makes React
@@ -455,7 +461,14 @@ export function PassFail({
 
         {summary && (
           <section className="rounded-lg border border-border bg-panel p-4">
-            <StatisticsPanel stats={summary.stats} unit={displayUnit(baseUnit)} bare layout="stack" title="Measured Spread" />
+            <StatisticsPanel
+              stats={summary.stats}
+              baseUnit={baseUnit}
+              resolution={summary.resolution ?? undefined}
+              bare
+              layout="stack"
+              title="Measured Spread"
+            />
           </section>
         )}
       </aside>

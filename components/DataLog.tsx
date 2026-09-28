@@ -80,8 +80,8 @@ export function DataLog({
   store,
   sampleVersion,
   stats,
-  unit,
-  decimals,
+  baseUnit,
+  resolution,
   canRecord,
   onExportCsv,
   onToggleRecord,
@@ -96,8 +96,10 @@ export function DataLog({
    *  thing that tells React anything changed. */
   sampleVersion: number;
   stats: SessionStats | null;
-  unit: string;
-  decimals?: number;
+  /** Raw SCALE base unit token, passed straight through to the Session Summary
+   *  StatisticsPanel — see its own prop doc for why it's not the display string. */
+  baseUnit: string;
+  resolution?: number;
   canRecord: boolean;
   onExportCsv: () => void;
   onToggleRecord: () => void;
@@ -394,7 +396,7 @@ export function DataLog({
           <hr className="border-border" />
 
           {/* Session summary — reuses the Dashboard's StatisticsPanel (bare, stacked) */}
-          <StatisticsPanel bare layout="stack" title="Session Summary" stats={stats} unit={unit} decimals={decimals} />
+          <StatisticsPanel bare layout="stack" title="Session Summary" stats={stats} baseUnit={baseUnit} resolution={resolution} />
         </div>
       </aside>
     </>
