@@ -6,7 +6,8 @@ import { clsx } from 'clsx';
 import { MODE_LABELS, SCALE, type Mode, type Reading, displayUnit } from '@/lib/parser';
 import { MODES, UNITS, type SampleStore } from '@/lib/samples';
 import { couldMatchIso, couldMatchValue, createIsoFormatter, localIso } from '@/lib/search';
-import { StatisticsPanel, type SessionStats } from '@/components/StatisticsPanel';
+import { StatisticsPanel } from '@/components/StatisticsPanel';
+import type { SessionStats } from '@/lib/capture';
 import { ActionButton } from '@/components/Controls';
 
 /**
