@@ -1,6 +1,6 @@
 // Self-check for lib/si.ts. Run: `node scripts/check-si.mts`
 import assert from 'node:assert/strict';
-import { formatSiValue, physicalUnitLabel, siPrefixOf, toPhysicalUnit } from '../lib/si.ts';
+import { formatSiValue, physicalUnitLabel, siAxisScale, siPrefixOf, toPhysicalUnit } from '../lib/si.ts';
 
 let checks = 0;
 const eq = (a: unknown, b: unknown, m: string) => { assert.equal(a, b, m); checks++; };
@@ -48,8 +48,8 @@ eq(
 );
 eq(
   JSON.stringify(formatSiValue('nF', 0, 0.001)),
-  JSON.stringify({ text: '0', unit: 'F' }),
-  'a real zero (e.g. P2P before a 2nd sample) never inflates into a long decimal string',
+  JSON.stringify({ text: '0', unit: 'nF' }),
+  'a real zero (e.g. P2P before a 2nd sample): short text, and a prefixed unit, never bare F',
 );
 
 // --- no rounding across a prefix boundary: the prefix comes from the TRUE magnitude, ---
@@ -64,5 +64,25 @@ eq(
   JSON.stringify({ text: '1000.000', unit: 'kΩ' }),
   'coarse resolution: rounds to look like the next decade but stays at the lower prefix',
 );
+
+// --- siAxisScale: ONE prefix per axis, from the extent, so a straddling axis never mixes ---
+eq(
+  JSON.stringify(siAxisScale('OM', 1_000_100, 100)),
+  JSON.stringify({ scale: 1e6, decimals: 4, unit: 'MΩ' }),
+  'straddling 999.9k..1.0001M: the extent picks M, and 999_900 then reads 0.9999, not 999.9 k',
+);
+eq(
+  JSON.stringify(siAxisScale('nF', 4700, 1)),
+  JSON.stringify({ scale: 1e-6, decimals: 3, unit: 'µF' }),
+  'capacitance axis is in farads: 4700 nF extent -> µF at 1 nF = 0.001 µF resolution',
+);
+eq(siAxisScale('OM', 11_113_000).decimals, 3, 'unknown resolution -> flat 3 decimals');
+eq(
+  JSON.stringify(siAxisScale('nF', 0, 0.001)),
+  JSON.stringify({ scale: 1e-9, decimals: 3, unit: 'nF' }),
+  'all-zero capacitance axis: one base unit (nF), not bare F with 12 decimals',
+);
+eq(siAxisScale('OM', 0, 0.1).unit, 'Ω', 'all-zero ohms keep the plain unit, not the resolution\'s mΩ');
+eq(formatSiValue('OM', 0, 0.1).unit, 'Ω', 'a zero P2P on an ohm reading still reads 0 Ω');
 
 console.log(`check-si: ${checks} assertions passed`);

@@ -65,8 +65,9 @@ export function formatSiValue(
   // still be huge once converted to a physical unit far from the base (capacitance's
   // nF->F correction turns a normal ~0.001 nF resolution into 1e-12) — without this,
   // a genuine zero briefly renders as "0.00000000000000F" instead of "0". Mirrors
-  // formatEntryValue's own zero case (lib/passfail.ts).
-  if (value === 0) return { text: '0', unit: physicalUnitLabel(baseUnit) };
+  // formatEntryValue's own zero case (lib/passfail.ts). The unit still gets a prefix:
+  // the meter tops out near 100 mF, so a bare "F" is never a real reading.
+  if (value === 0) return { text: '0', unit: siAxisScale(baseUnit, 0, resolution).unit };
   const physicalValue = toPhysicalUnit(baseUnit, value);
   const prefix = siPrefixOf(physicalValue);
   const scale = Math.pow(10, prefix.exp);
@@ -76,4 +77,24 @@ export function formatSiValue(
       : resolutionDecimals(toPhysicalUnit(baseUnit, resolution) / scale) + extraDecimals;
   const text = (physicalValue / scale).toFixed(decimals);
   return { text, unit: `${prefix.symbol}${physicalUnitLabel(baseUnit)}` };
+}
+
+/**
+ * One shared prefix for a whole axis, chosen from `extent` (the largest base-unit magnitude
+ * on display), so neighbouring ticks never read `999.9 k` next to `1.000 M`. Decimals come
+ * from `resolution` exactly as in `formatSiValue`. Format a tick as
+ * `(toPhysicalUnit(baseUnit, v) / scale).toFixed(decimals)`.
+ */
+export function siAxisScale(
+  baseUnit: string,
+  extent: number,
+  resolution?: number,
+): { scale: number; decimals: number; unit: string } {
+  // A zero extent has no magnitude; fall back to one base unit, so an all-zero capacitance
+  // axis reads nF (never a bare F) and every other unit keeps its unprefixed form.
+  const prefix = siPrefixOf(toPhysicalUnit(baseUnit, extent || 1));
+  const scale = Math.pow(10, prefix.exp);
+  const decimals =
+    resolution === undefined ? 3 : resolutionDecimals(toPhysicalUnit(baseUnit, resolution) / scale);
+  return { scale, decimals, unit: `${prefix.symbol}${physicalUnitLabel(baseUnit)}` };
 }
