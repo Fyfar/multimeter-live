@@ -493,8 +493,7 @@ export default function Home() {
     downloadCsv(csvBlob('Timestamp,Mode,Value,Unit,Notes', lines()), `multimeter-${Date.now()}.csv`);
   }, [store]);
 
-  // Numbers in the mode's ENTRY unit (ohms/volts/farads) with the unit in its own
-  // column, so the file holds plain numbers rather than SI-prefixed strings.
+  // Same unit convention as the Data Log export: the meter's own unit token per row.
   const exportVerdictCsv = useCallback(() => {
     function* lines() {
       for (const row of engine.passFailRows) yield verdictCsvLine(row);

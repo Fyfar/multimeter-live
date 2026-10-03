@@ -406,6 +406,8 @@ export class CaptureEngine {
               verdict: judge(baseValue, baseReference, baseBand),
               deviation: baseValue - baseReference,
               resolution: lsd,
+              unit: r.unit,
+              decimals: displayDecimals(r.display),
             });
           }
         }
