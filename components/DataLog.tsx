@@ -5,7 +5,7 @@ import { Search, Download, Square, Play, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { MODE_LABELS, SCALE, type Mode, type Reading, displayUnit } from '@/lib/parser';
 import { MODES, UNITS, type SampleStore } from '@/lib/samples';
-import { couldMatchIso, couldMatchValue, createIsoFormatter } from '@/lib/search';
+import { couldMatchIso, couldMatchValue, createIsoFormatter, localIso } from '@/lib/search';
 import { StatisticsPanel, type SessionStats } from '@/components/StatisticsPanel';
 import { ActionButton } from '@/components/Controls';
 
@@ -27,7 +27,7 @@ type RowData = {
 
 /** The row timestamp as the table and the CSV both render it. Formatted where it is used,
  *  never stored — at most 500 rows are visible, and the session may hold millions. */
-const rowIso = (ts: number): string => new Date(ts).toISOString();
+const rowIso = localIso;
 
 /** The value as the meter reported it: base value back through its unit's factor, at the
  *  meter's own digit count. `toFixed`, never `String` — a number has no memory of trailing
@@ -194,12 +194,12 @@ export function DataLog({
     // Skip a predicate entirely when its output cannot contain the query.
     const testValue = couldMatchValue(q);
     const testIso = couldMatchIso(q);
-    // `toISOString` emits upper-case T/Z; matching against the raw string saves a per-row
+    // `localIso` emits an upper-case T; matching against the raw string saves a per-row
     // `toLowerCase()` allocation.
     const upper = q.toUpperCase();
     // ~3 samples share a wall-clock second, so the second-prefix is rebuilt a third as often.
     // Formats a timestamp per scanned row, caching the per-second prefix. Defined in
-    // lib/search.ts so `scripts/check-search.mts` can assert it equals `toISOString()`.
+    // lib/search.ts so `scripts/check-search.mts` can assert it equals `localIso()`.
     const isoOf = createIsoFormatter();
 
     let scanned = 0;

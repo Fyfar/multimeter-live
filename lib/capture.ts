@@ -16,6 +16,7 @@ import {
   type ToleranceMode, type VerdictRow,
 } from './passfail.ts';
 import { DEFAULT_SETTINGS, type Settings } from './settings.ts';
+import { localIso } from './search.ts';
 
 // Stable-only logging: once a settled value is logged, the next is logged only if it
 // differs by >= this fraction — ignores ±1 LSD drift. NOTE: relative, so very sensitive
@@ -396,7 +397,7 @@ export class CaptureEngine {
             newVerdicts.push({
               id: this.pfRowId++,
               ts: r.ts,
-              iso: new Date(r.ts).toISOString(),
+              iso: localIso(r.ts),
               mode: r.mode,
               baseValue,
               baseReference,

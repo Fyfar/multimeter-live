@@ -26,6 +26,7 @@ import { useSerial, type SerialStatus } from '@/lib/useSerial';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '@/lib/settings';
 import { createBeeper, type Beeper } from '@/lib/beep';
 import { csvBlob, csvEsc } from '@/lib/csv';
+import { createIsoFormatter } from '@/lib/search';
 // App version — single source of truth is package.json "version". Bump it on every
 // change (see AGENTS.md "Versioning") so the footer reflects what's deployed.
 import { version as APP_VERSION } from '@/package.json';
@@ -478,11 +479,13 @@ export default function Home() {
   // 0.1 mV resolution is a different measurement from `0.145` at 1 mV.
   const exportCsv = useCallback(() => {
     function* lines() {
+      // The table's own formatter: local time with offset, so file and screen agree.
+      const isoOf = createIsoFormatter();
       for (let i = 0; i < store.count; i++) {
         const sm = store.at(i);
         const factor = SCALE[sm.unit]?.factor ?? 1;
         yield [
-          new Date(sm.ts).toISOString(),
+          isoOf(sm.ts),
           sm.mode,
           (sm.value / factor).toFixed(sm.decimals),
           sm.unit,
