@@ -121,7 +121,7 @@ const HELP = {
   hysteresis:
     'When logging is auto-started by the trigger, how far below the trigger threshold the reading must fall before logging auto-stops. A wider dead-band stops a signal hovering near the threshold from flapping logging on and off.',
   preserve:
-    'Off (default): switching the meter’s measurement mode clears all logged data. On: the recorded table and CSV are kept across a mode change (each row keeps its own mode/unit), while the live chart and statistics still reset — they show a single unit and can’t mix.',
+    'Off (default): switching the meter’s measurement mode clears all logged data and the Pass/Fail verdicts. On: the recorded table, the Pass/Fail verdicts and both CSVs are kept across a mode change (each row keeps its own mode/unit), while the live chart, statistics and Measured Spread still reset — they show a single unit and can’t mix. The Pass/Fail reference is cleared either way.',
   noDataWarning:
     'Shows a full-screen warning when the port is connected but no measurements arrive for a few seconds — usually the meter is off or the cable between the adapter and the meter is unplugged/broken (the adapter itself is fine). Purely informational: dismiss it with OK and the connection keeps running. It returns if data resumes and then stops again.',
   noDataAudio:

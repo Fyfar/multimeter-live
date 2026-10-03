@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   parseSiValue, entryToBase, ENTRY_UNITS, formatEntryValue, isPlausibleReference,
   isSupportedMode, resolveBand, isBandTooWide, judge, SUPPORTED_MODES,
-  parseSiEntry, resolveAbsoluteTolerance,
+  parseSiEntry, resolveAbsoluteTolerance, verdictCsvLine, type VerdictRow,
 } from '../lib/passfail.ts';
 
 let checks = 0;
@@ -177,5 +177,30 @@ close(parseSiValue('9' + '0'.repeat(20) + 'G'), 9e29, 'a large but finite value 
 // --- signed infix (previously uncovered) -------------------------------------------
 close(parseSiValue('-4k7'), -4700, 'negative infix');
 close(parseSiValue('+4k7'), 4700, 'explicitly positive infix');
+
+// --- verdict CSV: the meter's own unit per row (as the Data Log), no float noise ----------
+const vrow = (
+  mode: VerdictRow['mode'], baseValue: number, baseReference: number,
+  unit: string, decimals: number, tol = '1%',
+): VerdictRow => ({
+  id: 0, ts: 0, iso: 'T', mode, baseValue, baseReference, baseBand: 0,
+  toleranceMode: tol.endsWith('%') ? 'percent' : 'absolute',
+  toleranceValue: Number.parseFloat(tol), verdict: 'FAIL', deviation: baseValue - baseReference,
+  resolution: null, unit, decimals,
+});
+const csvCols = (r: VerdictRow) => verdictCsvLine(r).split(',');
+// the bench report: the table showed -11.1, the file -11.100000000000023
+eq(verdictCsvLine(vrow('RESISTANCE', 9988.9, 10_000, 'OM', 1)), 'T,RESISTANCE,9988.9,OM,10000,1%,-11.1,FAIL', 'deviation without noise');
+// cancellation: rounding the RESULT to significant digits cannot fix this one
+eq(csvCols(vrow('RESISTANCE', 10_000.001, 10_000, 'OM', 3))[6], '0.001', 'near-equal operands');
+eq(verdictCsvLine(vrow('RESISTANCE', 9988.9, 10_000, 'KOM', 4)), 'T,RESISTANCE,9.9889,KOM,10,1%,-0.0111,FAIL',
+  'kΩ range: Measured, Reference and Deviation all in the meter\'s unit');
+eq(csvCols(vrow('RESISTANCE', 3_000_000, 3_300_000, 'MOM', 3)).slice(2, 5).join(' '), '3.000 MOM 3.3',
+  'MΩ range: 3.000 as the meter showed it, not 3000000');
+const cap = csvCols(vrow('CAPACITANCE', 470, 470, 'nF', 1));
+eq([cap[2], cap[3], cap[4], cap[6]].join(' '), '470.0 nF 470 0', 'capacitance in nF keeps the meter\'s trailing zero');
+const uf = csvCols(vrow('CAPACITANCE', 4700.1, 4700, 'uF', 4));
+eq([uf[2], uf[3], uf[4], uf[6]].join(' '), '4.7001 uF 4.7 0.0001', 'µF range: no nF -> F division noise');
+eq(csvCols(vrow('DIODE', 0.652, 0.65, 'V', 3, '0.01'))[5], '±10 mV', 'absolute tolerance column unchanged');
 
 console.log(`check-passfail: ${checks} assertions passed`);

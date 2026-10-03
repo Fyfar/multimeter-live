@@ -170,19 +170,29 @@ export function PassFail({
     mode !== null && bandEntry !== null && lsd !== null &&
     bandEntry * toBase < lsd;
 
-  // One memoized pass for yield AND the value spread. This component re-renders on
-  // every serial batch while `rows` is unbounded, so an unmemoized scan here is O(n)
-  // work many times a second. `rows` is append-only, so the memo is exact.
+  // Yield over the whole table; the value spread only over the rows captured since the last
+  // mode change. With "Keep log on mode change" on, the table can hold several modes, and a
+  // mean of ohms and volts is meaningless — the same split the Dashboard makes between the
+  // log (everything) and the chart and statistics (current unit only). Every mode change
+  // switches `mode`, so the trailing run of rows in the current mode is one unit's rows. A
+  // detour through another mode that captured nothing leaves the run unbroken — same unit, fine.
+  //
+  // Memoized: this component re-renders on every serial batch while `rows` is unbounded,
+  // so an unmemoized scan here is O(n) work many times a second.
   const summary = useMemo(() => {
     if (rows.length === 0) return null;
-    let mean = 0, m2 = 0, min = Infinity, max = -Infinity, count = 0, passed = 0;
+    let passed = 0;
+    for (const r of rows) if (r.verdict === 'PASS') passed += 1;
+    let from = rows.length;
+    while (from > 0 && rows[from - 1].mode === mode) from -= 1;
+    let mean = 0, m2 = 0, min = Infinity, max = -Infinity, count = 0;
     // Coarsest LSD across the CAPTURED rows (not every live reading) — same "coarsest
-    // seen" idea as page.tsx's recordedResolutionRef, scoped to this batch so it clears
+    // seen" idea as the engine's recordedResolution, scoped to this batch so it clears
     // with Clear Batch instead of needing its own reset.
     let resolution: number | null = null;
-    for (const r of rows) {
+    for (let i = from; i < rows.length; i++) {
+      const r = rows[i];
       count += 1;
-      if (r.verdict === 'PASS') passed += 1;
       const delta = r.baseValue - mean;
       mean += delta / count;
       m2 += delta * (r.baseValue - mean);
@@ -190,9 +200,9 @@ export function PassFail({
       if (r.baseValue > max) max = r.baseValue;
       if (r.resolution !== null) resolution = Math.max(resolution ?? 0, r.resolution);
     }
-    return { stats: { count, mean, m2, min, max }, passed, failed: count - passed,
-             yieldPct: (passed / count) * 100, resolution };
-  }, [rows]);
+    return { stats: count > 0 ? { count, mean, m2, min, max } : null, passed,
+             failed: rows.length - passed, yieldPct: (passed / rows.length) * 100, resolution };
+  }, [rows, mode]);
 
   // Memoized for the same reason: a fresh 500-element array per batch makes React
   // reconcile 500 children each time (memo on VRow saves the render, not the diff).
@@ -459,7 +469,7 @@ export function PassFail({
           />
         </section>
 
-        {summary && (
+        {summary?.stats && (
           <section className="rounded-lg border border-border bg-panel p-4">
             <StatisticsPanel
               stats={summary.stats}

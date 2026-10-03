@@ -80,7 +80,8 @@ Type in a reference value and a tolerance, then touch parts one after another. E
 part that settles gets a PASS or FAIL against the band, lands in a table, and can
 optionally beep. The pass and fail tones are far apart in pitch and length so you can
 tell them apart without looking at the screen, which is the point when you are sorting
-a tray of resistors. Verdicts export to their own CSV, separate from the data log.
+a tray of resistors. Verdicts export to their own CSV, separate from the data log but in the same units the
+meter showed (`3.000,MOM`), so the two files line up.
 
 Some honest limits. It covers resistance, diode, and capacitance only: voltage and
 current have no overload reading on lifted probes, so there is no reliable way to tell
