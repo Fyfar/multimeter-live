@@ -29,6 +29,7 @@ const fresh = (s: Partial<CaptureSettings> = {}) => {
   const store = new SampleStore();
   const e = new CaptureEngine(store);
   e.configure({ ...BASE, ...s });
+  e.setPassFailActive(true);
   return { store, e };
 };
 const passFail = (e: CaptureEngine, ref: number, pct: number) =>
@@ -132,6 +133,36 @@ const passFail = (e: CaptureEngine, ref: number, pct: number) =>
   eq(e.passFailRows.length, 0, 'unsupported mode captures nothing');
 }
 
+// --- Pass/Fail works only on its own view -------------------------------------------
+{
+  const { e } = fresh();
+  e.ingest([R('10.000')]);
+  passFail(e, 10_000, 5);
+  e.ingest([R('10.000')]);
+  eq(e.passFailRows.length, 1, 'captured on the view');
+  e.setPassFailActive(false);
+  const away = e.ingest([OL(), R('12.000'), R('12.000'), OL(), R('10.000'), R('10.000')]);
+  eq([away.verdicts.length, away.rowsChanged, e.passFailRows.length], [0, false, 1],
+    'off the view: no verdict, no tone, stored rows untouched');
+  eq(away.currentStable, true, 'stability is still tracked off the view');
+  e.setPassFailActive(true);
+  e.ingest([R('10.000')]);
+  eq(e.passFailRows.length, 2, 'back on the view: a part swapped in while away is captured');
+  e.ingest([R('10.000'), R('10.000')]);
+  eq(e.passFailRows.length, 2, 'and only once');
+}
+{
+  const { e } = fresh();
+  e.ingest([R('10.000')]);
+  passFail(e, 10_000, 5);
+  e.ingest([R('10.000')]);
+  e.setPassFailActive(false);
+  e.ingest([R('10.000'), R('10.000')]);
+  e.setPassFailActive(true);
+  e.ingest([R('10.000'), R('10.000')]);
+  eq(e.passFailRows.length, 1, 'a part captured before leaving, still held, is not captured again');
+}
+
 // --- trigger --------------------------------------------------------------------------
 {
   const { store, e } = fresh();
@@ -183,6 +214,22 @@ const passFail = (e: CaptureEngine, ref: number, pct: number) =>
   const v = rd('VOLTAGE', '1.000', 'V');
   const r2 = e.ingest([v, rd('VOLTAGE', '1.000', 'V')]);
   eq([store.count, r2.sessionStart], [5, v.ts], 'the anchor is the first NEW-unit sample');
+}
+
+// --- Pass/Fail rows follow "Keep log on mode change" -----------------------------------
+{
+  const { e } = fresh({ preserveOnModeChange: true });
+  const D = (d: string) => rd('DIODE', d, 'V');
+  e.ingest([R('10.000')]);
+  passFail(e, 10_000, 5);
+  e.ingest([R('10.000')]);
+  const r = e.ingest([R('10.000'), D('0.650'), D('0.650')]);
+  eq([r.modeReset, r.rowsChanged, e.passFailRows.length], [true, false, 1], 'keep on: stored verdicts survive');
+  eq(r.verdicts.length, 0, 'the old reference is still cleared: nothing judged in the new unit');
+  passFail(e, 0.65, 5);
+  e.ingest([D('0.650')]);
+  eq(e.passFailRows.map((v) => v.mode), ['RESISTANCE', 'DIODE'], 'new-mode rows append after the kept ones');
+  eq(new Set(e.passFailRows.map((v) => v.id)).size, 2, 'row ids stay unique across the change');
 }
 
 // --- retention -------------------------------------------------------------------------

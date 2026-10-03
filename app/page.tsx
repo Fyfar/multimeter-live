@@ -19,9 +19,8 @@ import {
 import { SampleStore } from '@/lib/samples';
 import { CaptureEngine, type SessionStats } from '@/lib/capture';
 import {
-  ENTRY_UNITS, formatEntryValue, isSupportedMode, parseSiValue,
-  resolveAbsoluteTolerance, resolveBand,
-  type ToleranceMode, type VerdictRow,
+  VERDICT_CSV_HEADER, isSupportedMode, parseSiValue, resolveAbsoluteTolerance, resolveBand,
+  verdictCsvLine, type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
 import { useSerial, type SerialStatus } from '@/lib/useSerial';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '@/lib/settings';
@@ -183,6 +182,8 @@ export default function Home() {
     engine.configure({ stabilityCount, hysteresisPct, stableOnly, preserveOnModeChange, capNoPartFloor });
   }, [engine, stabilityCount, hysteresisPct, stableOnly, preserveOnModeChange, capNoPartFloor]);
   useEffect(() => { verdictAudioRef.current = verdictAudio; }, [verdictAudio]);
+  // Pass/Fail captures, counts and sounds only on its own view; see setPassFailActive.
+  useEffect(() => { engine.setPassFailActive(view === 'pass-fail'); }, [engine, view]);
   // Debounce each field independently. The cleanup cancels the pending commit on every
   // keystroke, so the value lands only once typing pauses.
   useEffect(() => {
@@ -496,23 +497,9 @@ export default function Home() {
   // column, so the file holds plain numbers rather than SI-prefixed strings.
   const exportVerdictCsv = useCallback(() => {
     function* lines() {
-      for (const row of engine.passFailRows) {
-        const { label, toBase } = ENTRY_UNITS[row.mode];
-        const tol =
-          row.toleranceMode === 'percent'
-            ? `${row.toleranceValue}%`
-            : `\u00B1${formatEntryValue(row.toleranceValue, label)}`;
-        yield [
-          row.iso, row.mode, String(row.baseValue / toBase), label,
-          String(row.baseReference / toBase), csvEsc(tol),
-          String(row.deviation / toBase), row.verdict,
-        ].join(',');
-      }
+      for (const row of engine.passFailRows) yield verdictCsvLine(row);
     }
-    downloadCsv(
-      csvBlob('Timestamp,Mode,Measured,Unit,Reference,Tolerance,Deviation,Verdict', lines()),
-      `multimeter-passfail-${Date.now()}.csv`,
-    );
+    downloadCsv(csvBlob(VERDICT_CSV_HEADER, lines()), `multimeter-passfail-${Date.now()}.csv`);
   }, [engine]);
 
   // The Pass/Fail view's active mode: the live reading's mode when supported, else null

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   parseSiValue, entryToBase, ENTRY_UNITS, formatEntryValue, isPlausibleReference,
   isSupportedMode, resolveBand, isBandTooWide, judge, SUPPORTED_MODES,
-  parseSiEntry, resolveAbsoluteTolerance,
+  parseSiEntry, resolveAbsoluteTolerance, verdictCsvLine, type VerdictRow,
 } from '../lib/passfail.ts';
 
 let checks = 0;
@@ -177,5 +177,21 @@ close(parseSiValue('9' + '0'.repeat(20) + 'G'), 9e29, 'a large but finite value 
 // --- signed infix (previously uncovered) -------------------------------------------
 close(parseSiValue('-4k7'), -4700, 'negative infix');
 close(parseSiValue('+4k7'), 4700, 'explicitly positive infix');
+
+// --- verdict CSV: no float noise in the numbers -------------------------------------
+const vrow = (mode: VerdictRow['mode'], baseValue: number, baseReference: number, tol = '1%'): VerdictRow => ({
+  id: 0, ts: 0, iso: 'T', mode, baseValue, baseReference, baseBand: 0,
+  toleranceMode: tol.endsWith('%') ? 'percent' : 'absolute',
+  toleranceValue: Number.parseFloat(tol), verdict: 'FAIL', deviation: baseValue - baseReference, resolution: null,
+});
+const csvCols = (r: VerdictRow) => verdictCsvLine(r).split(',');
+// the bench report: the table showed -11.1, the file -11.100000000000023
+eq(verdictCsvLine(vrow('RESISTANCE', 9988.9, 10_000)), 'T,RESISTANCE,9988.9,Ω,10000,1%,-11.1,FAIL', 'deviation without noise');
+// cancellation: rounding the RESULT to significant digits cannot fix this one
+eq(csvCols(vrow('RESISTANCE', 10_000.001, 10_000))[6], '0.001', 'near-equal operands');
+eq(csvCols(vrow('RESISTANCE', 4703, 4700))[2], '4703', 'real digits untouched');
+const cap = csvCols(vrow('CAPACITANCE', 100.1, 100));
+eq([cap[2], cap[4], cap[6]].join(' '), '1.001e-7 1e-7 1e-10', 'capacitance: nF -> F division noise stripped');
+eq(csvCols(vrow('DIODE', 0.652, 0.65, '0.01'))[5], '±10 mV', 'absolute tolerance column unchanged');
 
 console.log(`check-passfail: ${checks} assertions passed`);

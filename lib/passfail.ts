@@ -5,6 +5,7 @@
 
 import type { Mode } from '@/lib/parser';
 import { siPrefixOf } from './si.ts';
+import { csvEsc } from './csv.ts';
 
 // ---------------------------------------------------------------- SI value parsing
 
@@ -234,4 +235,44 @@ export interface VerdictRow {
    *  Measured Spread panel show the batch's real demonstrated resolution instead of a
    *  flat fallback — see `StatisticsPanel`'s `resolution` prop. */
   resolution: number | null;
+}
+
+// ------------------------------------------------------------------- CSV export
+
+export const VERDICT_CSV_HEADER = 'Timestamp,Mode,Measured,Unit,Reference,Tolerance,Deviation,Verdict';
+
+// Base -> entry is a division, so the error is relative and far below 12 significant digits:
+// rounding there strips it (`1.0010000000000001e-7` -> `1e-7`-style noise) without touching
+// a digit the meter or the operator produced.
+const entryNumber = (x: number): number => Number(x.toPrecision(12));
+
+// Decimal places of a number's shortest form, exponent included (`1.001e-7` -> 10).
+const decimalsOf = (x: number): number => {
+  const [mantissa, exp] = String(x).split('e');
+  return Math.max(0, (mantissa.split('.')[1]?.length ?? 0) - Number(exp ?? 0));
+};
+
+/**
+ * One verdict row as a CSV line, numbers in the mode's ENTRY unit. Deviation is NOT the
+ * stored `deviation` rescaled: a subtraction of near-equal values loses precision relative to
+ * its operands, not its result (`10000.001 - 10000` = `0.0009999999999763531`), so no
+ * significant-digit rounding of the result can clean it. The difference of two decimals has
+ * at most as many places as the finer operand, so it is recomputed from the exported values
+ * and rounded there — exact.
+ */
+export function verdictCsvLine(row: VerdictRow): string {
+  const { label, toBase } = ENTRY_UNITS[row.mode];
+  const measured = entryNumber(row.baseValue / toBase);
+  const reference = entryNumber(row.baseReference / toBase);
+  const places = Math.min(20, Math.max(decimalsOf(measured), decimalsOf(reference)));
+  const deviation = Number((measured - reference).toFixed(places));
+  const tol =
+    row.toleranceMode === 'percent'
+      ? `${row.toleranceValue}%`
+      : `\u00B1${formatEntryValue(row.toleranceValue, label)}`;
+  return [
+    row.iso, row.mode, String(measured), label,
+    String(reference), csvEsc(tol),
+    String(deviation), row.verdict,
+  ].join(',');
 }

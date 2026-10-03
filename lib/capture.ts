@@ -89,6 +89,9 @@ export class CaptureEngine {
   // by the same discontinuity (OL / capacitance no-part).
   private pfLastCaptured: number | null = null;
   private pfRowId = 0;
+  // Capture (rows, tones) only while the Pass/Fail view is open. Starts off: the page's
+  // first view is the Dashboard.
+  private passFailActive = false;
   // Base-unit value anchoring the current run. A reading joins the run while it stays
   // within STABLE_LSD_TOLERANCE of this; anything further starts a new run anchored at
   // itself. Anchored rather than compared to the immediately previous reading, so a
@@ -139,6 +142,13 @@ export class CaptureEngine {
     this.pfToleranceMode = toleranceMode;
   }
 
+  // Leaving the view keeps the reference, tolerance and rows; it only stops capturing. The
+  // latch still re-arms on a probe lift while away, so a part already captured and still
+  // held is not captured again on return, and a new part held on return is.
+  setPassFailActive(active: boolean): void {
+    this.passFailActive = active;
+  }
+
   // `manual`: a toggle by the operator, so this session is not trigger-owned and is never
   // auto-stopped.
   setRecording(v: boolean, manual = false): void {
@@ -156,9 +166,8 @@ export class CaptureEngine {
   // Deliberately does NOT touch `pfLastCaptured`: that guard is what stops a held
   // part from being captured twice, and it already re-arms itself on a genuine probe
   // lift (baseValue null/no-part, in ingest). Resetting it here too used to re-capture
-  // (and re-beep) the SAME still-connected part the instant Clear Batch was pressed —
-  // audible even after navigating away, since capture runs independent of which view
-  // is open. Clear Batch is a table boundary, not a probe-lift.
+  // (and re-beep) the SAME still-connected part the instant Clear Batch was pressed.
+  // Clear Batch is a table boundary, not a probe-lift.
   clearVerdicts(): void {
     this.passFailRows = [];
     this.pfRowId = 0;
@@ -278,18 +287,21 @@ export class CaptureEngine {
           armed = false;
           threshold = null;
           release = null;
-          // The reference and every captured verdict belong to the old mode's unit —
-          // neither is meaningful in the new one. Cleared for the same reason the
-          // trigger threshold is.
+          // The reference belongs to the old mode's unit and is meaningless in the new one —
+          // cleared for the same reason the trigger threshold is. The captured verdicts
+          // follow "Keep log on mode change" like the Data Log does: each row carries its own
+          // mode, so a kept batch stays valid in its original unit.
           this.pfRefEntry = null;
           this.pfBandEntry = null;
           this.pfToleranceValue = null;
           this.pfLastCaptured = null;
-          this.passFailRows = [];
-          this.pfRowId = 0;
-          newVerdicts.length = 0;
+          if (!this.preserveOnModeChange) {
+            this.passFailRows = [];
+            this.pfRowId = 0;
+            newVerdicts.length = 0;
+            rowsChanged = true;
+          }
           modeReset = true;
-          rowsChanged = true;
         }
       }
 
@@ -349,7 +361,7 @@ export class CaptureEngine {
         // value is already settled.
         const stable = this.stableRun >= this.stabilityCount;
 
-        // ---- Pass/Fail capture (independent of the recording session) ----------
+        // ---- Pass/Fail capture (independent of the recording session; Pass/Fail view only)
         // An exact zero means nothing is connected, not a part measuring zero: with the
         // probes floating the meter settles on 0 in every supported mode, and a real
         // component never reads a clean 0 (a 0R link still shows lead resistance).
@@ -359,6 +371,7 @@ export class CaptureEngine {
         if (baseValue === 0) {
           this.pfLastCaptured = null;
         } else if (
+          this.passFailActive &&
           stable &&
           pfRefEntry !== null &&
           pfBandEntry !== null &&
