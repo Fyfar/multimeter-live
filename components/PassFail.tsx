@@ -174,7 +174,8 @@ export function PassFail({
   // mode change. With "Keep log on mode change" on, the table can hold several modes, and a
   // mean of ohms and volts is meaningless — the same split the Dashboard makes between the
   // log (everything) and the chart and statistics (current unit only). Every mode change
-  // switches `mode`, so the trailing run of rows in the current mode is exactly that.
+  // switches `mode`, so the trailing run of rows in the current mode is one unit's rows. A
+  // detour through another mode that captured nothing leaves the run unbroken — same unit, fine.
   //
   // Memoized: this component re-renders on every serial batch while `rows` is unbounded,
   // so an unmemoized scan here is O(n) work many times a second.

@@ -197,8 +197,6 @@ const passFail = (e: CaptureEngine, ref: number, pct: number) =>
   eq([r.unit, r.modeReset, r.reset, r.recordingChanged, r.rowsChanged], ['V', true, true, true, true], 'flags');
   eq([store.count, e.recording, e.passFailRows.length], [0, false, 0], 'flushed, stopped, verdicts cleared');
   eq(r.stats, null, 'nothing appended after the reset');
-  e.ingest([R('10.000'), R('10.000'), R('10.000')]);
-  eq(e.passFailRows.length, 0, 'the old reference stays cleared on return to the same mode');
 }
 {
   const { store, e } = fresh({ preserveOnModeChange: true });

@@ -82,7 +82,6 @@ eq(
   JSON.stringify({ scale: 1e-9, decimals: 3, unit: 'nF' }),
   'all-zero capacitance axis: one base unit (nF), not bare F with 12 decimals',
 );
-eq(siAxisScale('OM', 0, 0.1).unit, 'Ω', 'all-zero ohms keep the plain unit, not the resolution\'s mΩ');
-eq(formatSiValue('OM', 0, 0.1).unit, 'Ω', 'a zero P2P on an ohm reading still reads 0 Ω');
+eq(formatSiValue('OM', 0, 0.1).unit, 'Ω', 'zero ohms keep the plain unit, not the resolution\'s mΩ (Statistics P2P and the chart axis share this path)');
 
 console.log(`check-si: ${checks} assertions passed`);
