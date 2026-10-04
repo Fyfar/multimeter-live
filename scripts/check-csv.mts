@@ -10,6 +10,9 @@ const { csvEsc, csvBlob, CSV_CHUNK_LINES, CHUNKS_PER_BLOB } = await import('../l
 let checks = 0;
 
 const HEADER = 'Timestamp,Mode,Value,Unit,Notes';
+// `blob.text()` strips a leading BOM, so the text asserts below cannot see it; sizes and the
+// raw bytes can.
+const BOM = '\uFEFF';
 const mkLines = (n: number) =>
   Array.from({ length: n }, (_, i) => `2026-09-23T00:00:00.000Z,Resistance,${i},OM,`);
 
@@ -27,10 +30,14 @@ for (const n of [0, 1, 2, CSV_CHUNK_LINES - 2, CSV_CHUNK_LINES - 1, CSV_CHUNK_LI
   const expected = [HEADER, ...lines].join('\n');
   const blob = csvBlob(HEADER, lines);
   assert.equal(await blob.text(), expected, `${n} lines: the assembled file is byte-identical`);
-  assert.equal(blob.size, Buffer.byteLength(expected), `${n} lines: byte length matches`);
+  assert.equal(blob.size, Buffer.byteLength(BOM + expected), `${n} lines: byte length matches`);
   assert.equal(blob.type, 'text/csv;charset=utf-8', `${n} lines: media type is set`);
   checks += 3;
 }
+
+assert.deepEqual([...new Uint8Array(await csvBlob(HEADER, []).arrayBuffer()).slice(0, 3)],
+  [0xef, 0xbb, 0xbf], 'starts with the UTF-8 BOM, so Excel decodes it as UTF-8');
+checks++;
 
 // No trailing newline — the property most likely to be "tidied up" by a later edit.
 assert.ok(!(await csvBlob(HEADER, mkLines(5)).text()).endsWith('\n'), 'no trailing newline');
@@ -70,7 +77,7 @@ checks += 4;
   const blob = csvBlob(HEADER, lines);
   const expected = [HEADER, ...lines].join('\n');
   assert.equal(await blob.text(), expected, 'non-ASCII round-trips');
-  assert.equal(blob.size, Buffer.byteLength(expected, 'utf8'), 'size is UTF-8 bytes, not characters');
+  assert.equal(blob.size, Buffer.byteLength(BOM + expected, 'utf8'), 'size is UTF-8 bytes, not characters');
   assert.ok(blob.size > expected.length, 'multi-byte characters really are multi-byte');
   checks += 3;
 }

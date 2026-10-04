@@ -11,13 +11,28 @@ import {
   judge, parseSiValue, resolveAbsoluteTolerance, resolveBand,
   type SupportedMode, type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
-import { siPrefixOf } from '@/lib/si';
+import { formatSiValue, siPrefixOf } from '@/lib/si';
 
 // Same windowing rationale as DataLog: keep every row in memory and in the CSV, but
 // cap what is painted into the DOM.
 const MAX_RENDERED = 500;
 const GRID_COLS =
   'grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_90px]';
+
+// Measured values at the reading's own resolution, the rule Measured Spread and the chart use.
+// Never a fixed digit count: meters on this protocol range from 25,000 to 60,000 counts, and a
+// trailing zero the meter displayed is part of the measurement (`formatEntryValue` drops it).
+const fmtMeasured = (baseUnit: string, v: number, lsd: number | null): string => {
+  const { text, unit } = formatSiValue(baseUnit, v, lsd ?? undefined);
+  return `${text} ${unit}`;
+};
+
+// Snapped to the LSD first: a reference carries float noise (22e-9 F -> 22.000000000000004 nF),
+// so an exact match would otherwise pick its prefix from 4e-15 and print `−0 pF`.
+const fmtDeviation = (baseUnit: string, dev: number, lsd: number | null): string => {
+  const d = lsd ? Math.round(dev / lsd) * lsd : dev;
+  return `${d >= 0 ? '+' : '\u2212'}${fmtMeasured(baseUnit, Math.abs(d), lsd)}`;
+};
 
 function Th({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -222,7 +237,7 @@ export function PassFail({
         ? 'Enter a reference and tolerance to compare'
         : verdict === null || deviation === null
           ? 'Settling\u2026'
-          : `${deviation >= 0 ? '+' : '\u2212'}${formatEntryValue(Math.abs(deviation) / toBase, entryUnit)} from reference`;
+          : `${fmtDeviation(baseUnit, deviation, lsd)} from reference`;
 
   // Unsupported mode: no controls, no capture, just an explanation.
   if (mode === null) {
@@ -280,7 +295,7 @@ export function PassFail({
           >
             {measuredBase === null
               ? '\u2014'
-              : formatEntryValue(measuredBase / toBase, entryUnit)}
+              : fmtMeasured(baseUnit, measuredBase, lsd)}
           </div>
 
           <div className="mt-1.5 flex h-4 items-center text-xs text-muted">
@@ -489,23 +504,22 @@ export function PassFail({
 // memo'd so a new capture re-renders only the appended row, and live-reading updates
 // (which fire many times a second) skip every existing row.
 const VRow = memo(function VRow({ row }: { row: VerdictRow }) {
-  const unit = ENTRY_UNITS[row.mode].label;
-  const toBase = ENTRY_UNITS[row.mode].toBase;
+  const { label: unit, toBase, baseUnit } = ENTRY_UNITS[row.mode];
   const pass = row.verdict === 'PASS';
   return (
     <div className={clsx(GRID_COLS, 'items-center border-b border-border/60 px-5 transition-colors hover:bg-surface/40')}>
       <div className="py-2 font-mono text-[11px] text-muted">
-        {new Date(row.ts).toLocaleTimeString('en')}
+        {/* The time part of the CSV's own timestamp: 24-hour, local, with milliseconds. */}
+        {row.iso.slice(11, 23)}
       </div>
       <div className="py-2 text-right font-mono text-xs text-fg">
-        {formatEntryValue(row.baseValue / toBase, unit)}
+        {fmtMeasured(baseUnit, row.baseValue, row.resolution)}
       </div>
       <div className="py-2 text-right font-mono text-[11px] text-muted">
         {formatEntryValue(row.baseReference / toBase, unit)}
       </div>
       <div className={clsx('py-2 text-right font-mono text-[11px]', pass ? 'text-muted' : 'text-danger')}>
-        {row.deviation >= 0 ? '+' : '−'}
-        {formatEntryValue(Math.abs(row.deviation) / toBase, unit)}
+        {fmtDeviation(baseUnit, row.deviation, row.resolution)}
       </div>
       <div className="py-2 text-right">
         <span
