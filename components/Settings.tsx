@@ -13,6 +13,7 @@ import {
   MIN_HYSTERESIS_PCT,
   MIN_NO_PART_FLOOR,
   MIN_STABILITY_COUNT,
+  type Settings as SettingValues,
 } from '@/lib/settings';
 
 // Question-mark affordance: reveals its explanation on hover AND keyboard focus
@@ -121,7 +122,7 @@ const HELP = {
   hysteresis:
     'When logging is auto-started by the trigger, how far below the trigger threshold the reading must fall before logging auto-stops. A wider dead-band stops a signal hovering near the threshold from flapping logging on and off.',
   preserve:
-    'Off (default): switching the meter’s measurement mode clears all logged data. On: the recorded table and CSV are kept across a mode change (each row keeps its own mode/unit), while the live chart and statistics still reset — they show a single unit and can’t mix.',
+    'Off (default): switching the meter’s measurement mode clears all logged data and the Pass/Fail verdicts. On: the recorded table, the Pass/Fail verdicts and both CSVs are kept across a mode change (each row keeps its own mode/unit), while the live chart, statistics and Measured Spread still reset — they show a single unit and can’t mix. The Pass/Fail reference is cleared either way.',
   noDataWarning:
     'Shows a full-screen warning when the port is connected but no measurements arrive for a few seconds — usually the meter is off or the cable between the adapter and the meter is unplugged/broken (the adapter itself is fine). Purely informational: dismiss it with OK and the connection keeps running. It returns if data resumes and then stops again.',
   noDataAudio:
@@ -133,36 +134,16 @@ const HELP = {
 } as const;
 
 export function Settings({
-  stabilityCount,
-  onStabilityCountChange,
-  hysteresisPct,
-  onHysteresisPctChange,
-  preserveOnModeChange,
-  onPreserveOnModeChangeChange,
-  noDataWarning,
-  onNoDataWarningChange,
-  noDataAudio,
-  onNoDataAudioChange,
-  capNoPartFloor,
-  onCapNoPartFloorChange,
-  verdictAudio,
-  onVerdictAudioChange,
+  settings,
+  onChange,
 }: {
-  stabilityCount: number;
-  onStabilityCountChange: (v: number) => void;
-  hysteresisPct: number;
-  onHysteresisPctChange: (v: number) => void;
-  preserveOnModeChange: boolean;
-  onPreserveOnModeChangeChange: (v: boolean) => void;
-  noDataWarning: boolean;
-  onNoDataWarningChange: (v: boolean) => void;
-  noDataAudio: boolean;
-  onNoDataAudioChange: (v: boolean) => void;
-  capNoPartFloor: number;
-  onCapNoPartFloorChange: (v: number) => void;
-  verdictAudio: boolean;
-  onVerdictAudioChange: (v: boolean) => void;
+  settings: SettingValues;
+  onChange: (patch: Partial<SettingValues>) => void;
 }) {
+  const {
+    stabilityCount, hysteresisPct, capNoPartFloor, preserveOnModeChange, noDataWarning,
+    noDataAudio, verdictAudio,
+  } = settings;
   return (
     <main className="min-w-0 flex-1 overflow-y-auto p-5">
       <div className="mx-auto max-w-2xl">
@@ -180,7 +161,7 @@ export function Settings({
             <SettingRow label="Stable readings to confirm" help={HELP.stability}>
               <NumberSetting
                 value={stabilityCount}
-                onCommit={onStabilityCountChange}
+                onCommit={(v) => onChange({ stabilityCount: v })}
                 clamp={clampStabilityCount}
                 min={MIN_STABILITY_COUNT}
                 max={MAX_STABILITY_COUNT}
@@ -190,7 +171,7 @@ export function Settings({
             <SettingRow label="Trigger hysteresis" help={HELP.hysteresis}>
               <NumberSetting
                 value={hysteresisPct}
-                onCommit={onHysteresisPctChange}
+                onCommit={(v) => onChange({ hysteresisPct: v })}
                 clamp={clampHysteresisPct}
                 min={MIN_HYSTERESIS_PCT}
                 max={MAX_HYSTERESIS_PCT}
@@ -201,7 +182,7 @@ export function Settings({
             <SettingRow label="Capacitance “no part” floor" help={HELP.capNoPartFloor}>
               <NumberSetting
                 value={capNoPartFloor}
-                onCommit={onCapNoPartFloorChange}
+                onCommit={(v) => onChange({ capNoPartFloor: v })}
                 clamp={clampNoPartFloor}
                 min={MIN_NO_PART_FLOOR}
                 max={MAX_NO_PART_FLOOR}
@@ -218,7 +199,7 @@ export function Settings({
           </header>
           <div className="px-4">
             <SettingRow label="Keep log on mode change" help={HELP.preserve}>
-              <Toggle checked={preserveOnModeChange} onChange={onPreserveOnModeChangeChange} />
+              <Toggle checked={preserveOnModeChange} onChange={(v) => onChange({ preserveOnModeChange: v })} />
             </SettingRow>
           </div>
         </section>
@@ -229,13 +210,13 @@ export function Settings({
           </header>
           <div className="divide-y divide-border px-4">
             <SettingRow label="Warn when connected but no data" help={HELP.noDataWarning}>
-              <Toggle checked={noDataWarning} onChange={onNoDataWarningChange} />
+              <Toggle checked={noDataWarning} onChange={(v) => onChange({ noDataWarning: v })} />
             </SettingRow>
             <SettingRow label="Sound the no-data alert" help={HELP.noDataAudio}>
-              <Toggle checked={noDataAudio} onChange={onNoDataAudioChange} disabled={!noDataWarning} />
+              <Toggle checked={noDataAudio} onChange={(v) => onChange({ noDataAudio: v })} disabled={!noDataWarning} />
             </SettingRow>
             <SettingRow label="Sound Pass/Fail verdicts" help={HELP.verdictAudio}>
-              <Toggle checked={verdictAudio} onChange={onVerdictAudioChange} />
+              <Toggle checked={verdictAudio} onChange={(v) => onChange({ verdictAudio: v })} />
             </SettingRow>
           </div>
         </section>

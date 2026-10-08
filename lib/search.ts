@@ -6,21 +6,14 @@
 // `true`. That is also why these live here rather than inline in the component — a `.tsx`
 // is unreachable from a self-check, and both bugs noted below shipped in the inline version.
 
-// `toISOString()` as fixed-width templates. `0` = any digit, `±` = a sign.
+// `localIso()` as fixed-width templates. `0` = any digit, `±` = a sign.
 //
-// TWO of them, because the output is not always 24 characters — outside years 0000-9999 it
-// carries a sign and six year digits:
-//   new Date(253402300800000).toISOString()  === '+010000-01-01T00:00:00.000Z'
+// TWO of them, because the output is not always 29 characters — outside years 0000-9999 it
+// carries a sign and six year digits, as `toISOString` does:
+//   '+010000-01-01T02:00:00.000+02:00'
 // Modelling only the normal form rejected '+' and '-053243', which really do occur.
-const ISO_TEMPLATE = '0000-00-00T00:00:00.000Z';
-const ISO_EXPANDED = '±000000-00-00T00:00:00.000Z';
-
-/** First ms needing the expanded form, and the earliest still in the 24-char form. */
-const ISO_NORMAL_MAX = 253402300800000;
-const ISO_NORMAL_MIN = -62167219200000;
-
-const isNormalIsoTime = (ts: number): boolean =>
-  Number.isFinite(ts) && ts >= ISO_NORMAL_MIN && ts < ISO_NORMAL_MAX;
+const ISO_TEMPLATE = '0000-00-00T00:00:00.000±00:00';
+const ISO_EXPANDED = '±000000-00-00T00:00:00.000±00:00';
 
 const fitsAt = (q: string, tpl: string, p: number): boolean => {
   for (let k = 0; k < q.length; k++) {
@@ -47,9 +40,8 @@ const fitsTemplate = (q: string, tpl: string): boolean => {
  * Whether `q` could occur inside SOME ISO timestamp. Conservative: tests digit-ness, not
  * ranges, so `'9-99'` is admitted though no month is 99.
  *
- * A charset test would not do: `'zzz'` is all ISO characters, but neither template holds more
- * than one `Z` and it is last. Normalizes case rather than trusting a caller precondition
- * nothing enforces.
+ * A charset test would not do: `'tt'` is all ISO characters, but each template holds one `T`.
+ * Normalizes case rather than trusting a caller precondition nothing enforces.
  */
 export const couldMatchIso = (query: string): boolean => {
   const q = query.toLowerCase();
@@ -69,27 +61,53 @@ const VALUE_CHARS = /^[0-9.\-]+$/;
 /** Whether `q` could occur inside a formatted reading. Empty matches everything. */
 export const couldMatchValue = (q: string): boolean => q.length === 0 || VALUE_CHARS.test(q);
 
+const pad = (n: number, width: number): string => String(n).padStart(width, '0');
+
 /**
- * An ISO formatter caching the per-second prefix — ~3 samples share a wall-clock second, so
- * the `Date` work drops to a third. Returns exactly `new Date(ts).toISOString()` for every
- * `ts`; `check-search.mts` asserts that equality, because two silent bugs lived here:
+ * `ts` as ISO 8601 in the user's own timezone, with the offset spelled out
+ * (`2026-10-03T17:29:05.123+03:00`): the clock the operator saw, and still unambiguous across
+ * a DST change or when the file is opened elsewhere. UTC is `+00:00`, never `Z` — one shape.
+ * Years outside 0000-9999 take `toISOString`'s expanded `±YYYYYY` form.
+ */
+export const localIso = (ts: number): string => {
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const year = y >= 0 && y <= 9999 ? pad(y, 4) : (y < 0 ? '-' : '+') + pad(Math.abs(y), 6);
+  const off = -d.getTimezoneOffset();
+  const abs = Math.abs(off);
+  return (
+    `${year}-${pad(d.getMonth() + 1, 2)}-${pad(d.getDate(), 2)}` +
+    `T${pad(d.getHours(), 2)}:${pad(d.getMinutes(), 2)}:${pad(d.getSeconds(), 2)}.${pad(d.getMilliseconds(), 3)}` +
+    `${off < 0 ? '-' : '+'}${pad(Math.floor(abs / 60), 2)}:${pad(abs % 60, 2)}`
+  );
+};
+
+/**
+ * `localIso` caching the per-second head and offset — ~3 samples share a wall-clock second,
+ * so the `Date` work drops to a third. Returns exactly `localIso(ts)` for every `ts`;
+ * `check-search.mts` asserts that equality, because two silent bugs lived here:
  *
- *  - `ts % 1000` keeps the dividend's sign, so a pre-1970 row built `…59.00-1Z`.
+ *  - `ts % 1000` keeps the dividend's sign, so a pre-1970 row built `…59.00-1`.
  *    `ts - sec * 1000` is always in [0, 1000) since `sec` is a floor.
  *  - `-1` as the "nothing cached" sentinel collides with a real second (the last before the
  *    epoch), reusing a stale prefix. `NaN` cannot collide.
+ *
+ * Caching per second is safe for the offset too: zones change offset on whole seconds.
  */
 export const createIsoFormatter = (): ((ts: number) => string) => {
   let cachedSec = NaN;
-  let cachedPrefix = '';
+  let head = '';
+  let offset = '';
   return (ts: number): string => {
-    if (!isNormalIsoTime(ts)) return new Date(ts).toISOString();
+    if (!Number.isFinite(ts)) return localIso(ts);
     const sec = Math.floor(ts / 1000);
     if (sec !== cachedSec) {
       cachedSec = sec;
-      cachedPrefix = new Date(sec * 1000).toISOString().slice(0, 19);
+      const full = localIso(sec * 1000);
+      head = full.slice(0, -10); // drop '.000+HH:MM'
+      offset = full.slice(-6);
     }
     const ms = ts - sec * 1000;
-    return `${cachedPrefix}.${ms < 10 ? '00' : ms < 100 ? '0' : ''}${ms}Z`;
+    return `${head}.${ms < 10 ? '00' : ms < 100 ? '0' : ''}${ms}${offset}`;
   };
 };

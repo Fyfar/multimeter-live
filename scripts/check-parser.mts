@@ -145,6 +145,7 @@ checks += 3;
 assert.equal(displayUnit('OM'), '\u03A9', 'OM renders as the ohm symbol');
 assert.equal(displayUnit('KOM'), 'k\u03A9', 'KOM renders as kilo-ohm');
 assert.equal(displayUnit('MOM'), 'M\u03A9', 'MOM renders as mega-ohm');
+assert.equal(displayUnit('uF'), '\u00B5F', 'ASCII uF renders as µF, the spelling si.ts uses');
 // Everything else passes through untouched — a unit with no prettier spelling must not
 // be silently dropped or blanked.
 assert.equal(displayUnit('V'), 'V', 'volts pass through');
@@ -156,6 +157,6 @@ assert.equal(parseMeasurement('RESISTANCE', 'Resistance:', '009.79 OM').unit, 'O
   'Reading.unit keeps the wire spelling');
 assert.equal(normalizeReading(parseMeasurement('RESISTANCE', 'Resistance:', '009.79 KOM')).baseUnit,
   'OM', 'normalizeReading still keys off the wire spelling');
-checks += 9;
+checks += 10;
 
 console.log(`check-parser: ${checks} assertions passed`);

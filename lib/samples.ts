@@ -108,6 +108,14 @@ const newChunk = (): Chunk => ({
   decimals: new Uint8Array(CHUNK),
 });
 
+const copyChunk = (c: Chunk): Chunk => ({
+  ts: c.ts.slice(),
+  value: c.value.slice(),
+  mode: c.mode.slice(),
+  unit: c.unit.slice(),
+  decimals: c.decimals.slice(),
+});
+
 /** A structured-cloneable snapshot. Carries its dictionaries so `from` can remap. */
 export interface Snapshot {
   version: 1;
@@ -289,13 +297,7 @@ export class SampleStore {
       // slot N of the same chunk, each silently overwriting the other's samples, and
       // `from`'s dictionary remap would rewrite the original store in place. The copy is
       // one memcpy — the same cost `structuredClone` would pay on the way to storage.
-      chunks: this.#chunks.map((c) => ({
-        ts: c.ts.slice(),
-        value: c.value.slice(),
-        mode: c.mode.slice(),
-        unit: c.unit.slice(),
-        decimals: c.decimals.slice(),
-      })),
+      chunks: this.#chunks.map(copyChunk),
       notes: [...this.#notes],
     };
   }
@@ -315,13 +317,7 @@ export class SampleStore {
     const store = new SampleStore();
     store.#firstSeq = snap.firstSeq;
     store.#count = snap.count;
-    store.#chunks = snap.chunks.map((c) => ({
-      ts: c.ts.slice(),
-      value: c.value.slice(),
-      mode: c.mode.slice(),
-      unit: c.unit.slice(),
-      decimals: c.decimals.slice(),
-    }));
+    store.#chunks = snap.chunks.map(copyChunk);
     store.#notes = new Map(snap.notes);
 
     // Units auto-extend (`#unitId`), so they can never fail to resolve. MODES is fixed and

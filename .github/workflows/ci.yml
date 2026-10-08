@@ -24,6 +24,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history: the fallow step diffs this branch against origin/main.
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -42,6 +45,11 @@ jobs:
 
       - name: Self-checks
         run: npm run check
+
+      # Fails on dead code or duplication this branch introduces; complexity is only
+      # annotated (rules in .fallowrc.json). Findings show inline on the PR diff.
+      - name: Code quality (fallow)
+        run: npx fallow audit --base origin/main --format github-annotations
 
       - name: Build static export
         env:

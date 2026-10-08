@@ -2,8 +2,7 @@
 
 import { clsx } from 'clsx';
 import { formatSiValue } from '@/lib/si';
-
-export type SessionStats = { count: number; mean: number; m2: number; min: number; max: number };
+import type { SessionStats } from '@/lib/capture';
 
 export function StatisticsPanel({
   stats,

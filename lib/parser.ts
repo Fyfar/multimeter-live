@@ -93,6 +93,9 @@ const DISPLAY_UNITS: Record<string, string> = {
   OM: '\u03A9',   // Ω
   KOM: 'k\u03A9', // kΩ
   MOM: 'M\u03A9', // MΩ
+  // The meter sends ASCII `uF`; every SI-formatted view (chart, statistics, Pass/Fail) says µF.
+  uF: '\u00B5F',
+  '\u03BCF': '\u00B5F',
 };
 
 /** The operator-facing spelling of a raw meter unit. Unmapped units pass through. */

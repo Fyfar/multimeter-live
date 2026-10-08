@@ -33,7 +33,7 @@ export const CHUNKS_PER_BLOB = 100;
  * Blob is safe at 200,000 parts; the chain is the only shape that fails.
  *
  * The separator goes BETWEEN chunks, never after a line, so the result is exactly
- * `[header, ...lines].join('\n')` — no trailing newline, no visible chunk boundary. That
+ * `'\uFEFF' + [header, ...lines].join('\n')` — no trailing newline, no visible chunk boundary. That
  * equality is the contract; scripts/check-csv.mts asserts it against the finished file,
  * because a corrupt export is silent.
  */
@@ -41,7 +41,9 @@ export function csvBlob(header: string, lines: Iterable<string>): Blob {
   const type = 'text/csv;charset=utf-8';
   const blobs: Blob[] = [];
   let pending: string[] = [];
-  let chunk: string[] = [header];
+  // UTF-8 BOM: without it Excel decodes the file as the system code page and shows `±25 Ω`
+  // or a Cyrillic note as `Â±25 Î©`. `Blob.text()` and most CSV readers strip it.
+  let chunk: string[] = ['\uFEFF' + header];
   let started = false;
 
   const endChunk = () => {
