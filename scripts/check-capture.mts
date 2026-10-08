@@ -34,6 +34,13 @@ const fresh = (s: Partial<CaptureSettings> = {}) => {
 };
 const passFail = (e: CaptureEngine, ref: number, pct: number) =>
   e.setPassFailConfig(ref, pct, resolveBand(ref, pct, 'percent'), 'percent');
+// A 10 kΩ part already on the probes when Pass/Fail is set to 10 kΩ ±5%; the next R('10.000') captures.
+const tenKOnView = () => {
+  const { e } = fresh();
+  e.ingest([R('10.000')]);
+  passFail(e, 10_000, 5);
+  return e;
+};
 
 // --- first detection is not a mode change ---------------------------------------------
 {
@@ -95,9 +102,7 @@ const passFail = (e: CaptureEngine, ref: number, pct: number) =>
 
 // --- Pass/Fail capture ----------------------------------------------------------------
 {
-  const { e } = fresh();
-  e.ingest([R('10.000')]);
-  passFail(e, 10_000, 5);
+  const e = tenKOnView();
   const first = e.ingest([R('10.000')]);
   eq([first.rowsChanged, first.verdicts.map((v) => v.verdict)], [true, ['PASS']], 'captured once stable');
   eq(e.ingest(times(4, () => R('10.001'))).verdicts.length, 0, 'a held part is not captured twice');
@@ -135,9 +140,7 @@ const passFail = (e: CaptureEngine, ref: number, pct: number) =>
 
 // --- Pass/Fail works only on its own view -------------------------------------------
 {
-  const { e } = fresh();
-  e.ingest([R('10.000')]);
-  passFail(e, 10_000, 5);
+  const e = tenKOnView();
   e.ingest([R('10.000')]);
   eq(e.passFailRows.length, 1, 'captured on the view');
   e.setPassFailActive(false);
@@ -152,9 +155,7 @@ const passFail = (e: CaptureEngine, ref: number, pct: number) =>
   eq(e.passFailRows.length, 2, 'and only once');
 }
 {
-  const { e } = fresh();
-  e.ingest([R('10.000')]);
-  passFail(e, 10_000, 5);
+  const e = tenKOnView();
   e.ingest([R('10.000')]);
   e.setPassFailActive(false);
   e.ingest([R('10.000'), R('10.000')]);

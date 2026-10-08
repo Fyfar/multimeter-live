@@ -49,7 +49,7 @@ export type { TimeRange };
 
 const TIME_RANGE_LABELS: readonly TimeRange[] = TIME_RANGES;
 
-export type ChartType = 'line' | 'histogram';
+type ChartType = 'line' | 'histogram';
 
 const CHART_TYPE_LABELS: { type: ChartType; label: string }[] = [
   { type: 'line', label: 'Line' },

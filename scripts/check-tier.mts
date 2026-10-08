@@ -19,7 +19,22 @@ let checks = 0;
 
 interface S { ts: number; v: number }
 
-/** Brute-force reference: bucket by hand, keep min/max and the timestamp each occurred at. */
+/** Bucket by hand: per column, the min and max and the timestamp each occurred at. */
+function columnExtremes(samples: S[], t0: number, bucketMs: number) {
+  const cols = new Map<number, { lo: number; hi: number; loTs: number; hiTs: number }>();
+  for (const { ts, v } of samples) {
+    const i = Math.max(0, Math.floor((ts - t0) / bucketMs));
+    const b = cols.get(i);
+    if (!b) cols.set(i, { lo: v, hi: v, loTs: ts, hiTs: ts });
+    else {
+      if (v < b.lo) { b.lo = v; b.loTs = ts; }
+      if (v > b.hi) { b.hi = v; b.hiTs = ts; }
+    }
+  }
+  return cols;
+}
+
+/** Brute-force reference of the tier's output, built on columnExtremes(). */
 function reference(
   samples: S[],
   t0: number,
@@ -28,18 +43,7 @@ function reference(
   clampMin?: number,
   clampMax?: number,
 ): TierPoint[] {
-  const cols = new Map<number, { lo: number; hi: number; loTs: number; hiTs: number }>();
-  for (const { ts, v } of samples) {
-    let i = Math.floor((ts - t0) / bucketMs);
-    if (i < 0) i = 0;
-    assert.ok(i < columns, 'reference: sample outside the tier — widen bucketMs in the test');
-    const b = cols.get(i);
-    if (!b) cols.set(i, { lo: v, hi: v, loTs: ts, hiTs: ts });
-    else {
-      if (v < b.lo) { b.lo = v; b.loTs = ts; }
-      if (v > b.hi) { b.hi = v; b.hiTs = ts; }
-    }
-  }
+  const cols = columnExtremes(samples, t0, bucketMs);
   const clamp = (v: number) => {
     if (clampMax !== undefined && v > clampMax) return clampMax;
     if (clampMin !== undefined && v < clampMin) return clampMin;
@@ -47,6 +51,7 @@ function reference(
   };
   const out: TierPoint[] = [];
   for (const i of [...cols.keys()].sort((a, b) => a - b)) {
+    assert.ok(i < columns, 'reference: sample outside the tier — widen bucketMs in the test');
     const b = cols.get(i)!;
     const loY = clamp(b.lo);
     const hiY = clamp(b.hi);
@@ -67,16 +72,7 @@ function reference(
 const everyExtremeSurvives = (
   samples: S[], pts: TierPoint[], t0: number, bucketMs: number, where: string,
 ) => {
-  const cols = new Map<number, { lo: number; hi: number; loTs: number; hiTs: number }>();
-  for (const { ts, v } of samples) {
-    const i = Math.max(0, Math.floor((ts - t0) / bucketMs));
-    const b = cols.get(i);
-    if (!b) cols.set(i, { lo: v, hi: v, loTs: ts, hiTs: ts });
-    else {
-      if (v < b.lo) { b.lo = v; b.loTs = ts; }
-      if (v > b.hi) { b.hi = v; b.hiTs = ts; }
-    }
-  }
+  const cols = columnExtremes(samples, t0, bucketMs);
   const has = (x: number, y: number) => pts.some((p) => p.x === x && p.y === y);
   for (const b of cols.values()) {
     assert.ok(has(b.loTs, b.lo), `${where}: column minimum ${b.lo}@${b.loTs} survived`);
@@ -92,6 +88,17 @@ const samePoints = (a: TierPoint[], b: TierPoint[], where: string) => {
     assert.equal(a[i].oor, b[i].oor, `${where}: oor at ${i}`);
   }
 };
+
+/** A tier grown from 1 ms by doublings, and one built directly at the width it grew to. */
+function grownAndDirect(columns: number, samples: S[], t0: number) {
+  const grown = new RenderTier(columns);
+  grown.reset(t0, 1); // absurdly narrow on purpose: forces many doublings
+  for (const s of samples) grown.add(s.ts, s.v);
+  const direct = new RenderTier(columns);
+  direct.reset(t0, grown.bucketMs);
+  for (const s of samples) direct.add(s.ts, s.v);
+  return { grown, direct };
+}
 
 /** Deterministic pseudo-random, so a failure is reproducible. */
 function makeSamples(n: number, t0: number, stepMs: number): S[] {
@@ -110,14 +117,8 @@ function makeSamples(n: number, t0: number, stepMs: number): S[] {
   const t0 = 1_000_000;
   const samples = makeSamples(400, t0, 33);
 
-  const grown = new RenderTier(COLUMNS);
-  grown.reset(t0, 1); // absurdly narrow on purpose: forces many doublings
-  for (const s of samples) grown.add(s.ts, s.v);
+  const { grown, direct } = grownAndDirect(COLUMNS, samples, t0);
   assert.ok(grown.bucketMs > 4, `at least two doublings happened (bucketMs=${grown.bucketMs})`);
-
-  const direct = new RenderTier(COLUMNS);
-  direct.reset(t0, grown.bucketMs);
-  for (const s of samples) direct.add(s.ts, s.v);
 
   samePoints(grown.points(), direct.points(), 'grown vs direct');
   assert.equal(grown.t0, direct.t0, 'doubling does not move t0');
@@ -133,13 +134,7 @@ function makeSamples(n: number, t0: number, stepMs: number): S[] {
     for (const n of [1, 2, 17, 500, 3000]) {
       const t0 = 500_000;
       const samples = makeSamples(n, t0, 17);
-      const grown = new RenderTier(COLUMNS);
-      grown.reset(t0, 1);
-      for (const s of samples) grown.add(s.ts, s.v);
-
-      const direct = new RenderTier(COLUMNS);
-      direct.reset(t0, grown.bucketMs);
-      for (const s of samples) direct.add(s.ts, s.v);
+      const { grown, direct } = grownAndDirect(COLUMNS, samples, t0);
       samePoints(grown.points(), direct.points(), `grown vs direct (cols=${COLUMNS}, n=${n})`);
       samePoints(
         grown.points(),

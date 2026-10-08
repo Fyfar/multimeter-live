@@ -1,0 +1,26 @@
+{
+  "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
+  "minimumVersion": "3.32.0",
+  // Registered by URL string in components/ServiceWorker.tsx, invisible to the import graph.
+  "dynamicallyLoaded": ["public/sw.js"],
+  "duplicates": {
+    // Any clone fails: 0.01% is under one 5-line block of this repo.
+    "threshold": 0.01
+  },
+  "health": {
+    // Industry defaults (SonarQube's cognitive ceiling is 15). The big React components
+    // already exceed them; `fallow audit` reports only what a change makes worse.
+    "maxCyclomatic": 20,
+    "maxCognitive": 15,
+    // Pairs with "complexity-crap": "off". Off alone still titles cognitive findings
+    // "High CRAP score" in annotations (fallow 3.32); out of reach, CRAP never matches.
+    "maxCrap": 1000000
+  },
+  "rules": {
+    // Complexity advises; dead code and duplication block (their default severity).
+    "complexity-cyclomatic": "warn",
+    "complexity-cognitive": "warn",
+    // CRAP needs coverage data; this repo has none, so every branchy helper would read as 0% covered.
+    "complexity-crap": "off"
+  }
+}

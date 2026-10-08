@@ -178,16 +178,11 @@ export class RenderTier {
         continue;
       }
       // Both occupied: the surviving extreme keeps ITS OWN timestamp, not the column's.
-      if (this.#minV[b] < this.#minV[a]) {
-        this.#minV[j] = this.#minV[b]; this.#minTs[j] = this.#minTs[b];
-      } else {
-        this.#minV[j] = this.#minV[a]; this.#minTs[j] = this.#minTs[a];
-      }
-      if (this.#maxV[b] > this.#maxV[a]) {
-        this.#maxV[j] = this.#maxV[b]; this.#maxTs[j] = this.#maxTs[b];
-      } else {
-        this.#maxV[j] = this.#maxV[a]; this.#maxTs[j] = this.#maxTs[a];
-      }
+      // Ties keep `a`, the earlier column.
+      const lo = this.#minV[b] < this.#minV[a] ? b : a;
+      const hi = this.#maxV[b] > this.#maxV[a] ? b : a;
+      this.#minV[j] = this.#minV[lo]; this.#minTs[j] = this.#minTs[lo];
+      this.#maxV[j] = this.#maxV[hi]; this.#maxTs[j] = this.#maxTs[hi];
       this.#count[j] = ca + cb;
     }
     this.#count.fill(0, half);

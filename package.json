@@ -1,6 +1,6 @@
 {
   "name": "multimeter-live",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "private": true,
   "engines": {
     "node": ">=22.18.0"
@@ -29,7 +29,8 @@
     "dev": "next dev",
     "build": "next build && node scripts/finalize-pwa.mjs",
     "lint": "eslint",
-    "check": "node scripts/check-parser.mts && node scripts/check-settings.mts && node scripts/check-passfail.mts && node scripts/check-si.mts && node scripts/check-csv.mts && node scripts/check-search.mts && node scripts/check-samples.mts && node scripts/check-tier.mts && node scripts/check-capture.mts && node scripts/check-histogram.mts"
+    "check": "node scripts/check-parser.mts && node scripts/check-settings.mts && node scripts/check-passfail.mts && node scripts/check-si.mts && node scripts/check-csv.mts && node scripts/check-search.mts && node scripts/check-samples.mts && node scripts/check-tier.mts && node scripts/check-capture.mts && node scripts/check-histogram.mts",
+    "fallow": "fallow audit"
   },
   "dependencies": {
     "chart.js": "^4.5.1",
@@ -46,6 +47,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.8",
+    "fallow": "3.32.0",
     "tailwindcss": "^4.3.1",
     "typescript": "^5"
   }
