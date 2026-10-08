@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { MoreVertical } from 'lucide-react';
 import { clsx } from 'clsx';
 import { DigitalDisplay } from '@/components/DigitalDisplay';
-import { RealtimeChart, type TimeRange } from '@/components/RealtimeChart';
+import { RealtimeChart } from '@/components/RealtimeChart';
 import { Controls } from '@/components/Controls';
 import { Sidebar, NAV_IDS, type NavId } from '@/components/Sidebar';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
@@ -19,11 +19,13 @@ import {
 import { SampleStore } from '@/lib/samples';
 import { CaptureEngine, type SessionStats } from '@/lib/capture';
 import {
-  VERDICT_CSV_HEADER, isSupportedMode, parseSiValue, resolveAbsoluteTolerance, resolveBand,
-  verdictCsvLine, type ToleranceMode, type VerdictRow,
+  VERDICT_CSV_HEADER, isSupportedMode, parseEntry, verdictCsvLine,
+  type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
 import { useSerial, type SerialStatus } from '@/lib/useSerial';
-import { DEFAULT_SETTINGS, loadSettings, saveSettings } from '@/lib/settings';
+import {
+  DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings as SettingValues,
+} from '@/lib/settings';
 import { createBeeper, type Beeper } from '@/lib/beep';
 import { csvBlob, csvEsc } from '@/lib/csv';
 import { createIsoFormatter } from '@/lib/search';
@@ -71,8 +73,52 @@ const STATUS_DOT: Record<SerialStatus, string> = {
   unsupported: 'bg-muted',
 };
 
+function AppHeader({ status, baud }: { status: SerialStatus; baud: number }) {
+  return (
+    <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-canvas px-5">
+      {/* Logo */}
+      <div className="flex items-center gap-2.5">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="22,12 18,12 15,21 9,3 6,12 2,12" />
+        </svg>
+        <span className="text-sm font-semibold text-fg">Multimeter Visualizer</span>
+      </div>
+
+      {/* Connection status */}
+      <div className="flex items-center gap-2 text-sm">
+        <span className={clsx('h-2 w-2 rounded-full', STATUS_DOT[status])} />
+        <span className={status === 'connected' ? 'text-success' : 'text-muted'}>
+          {STATUS_LABEL[status]}
+        </span>
+        {status === 'connected' && (
+          <span className="text-muted">
+            UART &nbsp;·&nbsp; {baud} bps
+          </span>
+        )}
+      </div>
+
+      {/* Actions */}
+      <div className="flex items-center gap-2">
+        <button className="flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted transition-colors hover:bg-surface hover:text-fg">
+          <MoreVertical size={14} />
+        </button>
+      </div>
+    </header>
+  );
+}
+
 export default function Home() {
-  const [baud, setBaud] = useState(DEFAULT_SETTINGS.baud);
+  // Persisted settings. Start at defaults so the static-export HTML matches the first
+  // client render; a mount effect then hydrates from storage.
+  const [settings, setSettings] = useState<SettingValues>(DEFAULT_SETTINGS);
+  const updateSettings = useCallback(
+    (patch: Partial<SettingValues>) => setSettings((s) => ({ ...s, ...patch })),
+    [],
+  );
+  const {
+    baud, rangeMin, rangeMax, autoScale, timeRange, stableOnly, stabilityCount, hysteresisPct,
+    preserveOnModeChange, noDataWarning, noDataAudio, capNoPartFloor, verdictAudio,
+  } = settings;
   // The active view. Stays 'dashboard' for the first render so it matches the statically
   // exported HTML; the URL hash takes over in the mount effect below.
   const [view, setView] = useState<NavId>('dashboard');
@@ -107,22 +153,8 @@ export default function Home() {
   // chart's y-axis need this, not the display string, so each value/tick can pick its own
   // SI prefix and apply the capacitance nF->F correction themselves (lib/si.ts).
   const [chartBaseUnit, setChartBaseUnit] = useState('');
-  const [rangeMin, setRangeMin] = useState(DEFAULT_SETTINGS.rangeMin);
-  const [rangeMax, setRangeMax] = useState(DEFAULT_SETTINGS.rangeMax);
-  const [autoScale, setAutoScale] = useState(DEFAULT_SETTINGS.autoScale);
-  const [timeRange, setTimeRange] = useState<TimeRange>(DEFAULT_SETTINGS.timeRange);
   const [triggerArmed, setTriggerArmed] = useState(false);
   const [triggerThreshold, setTriggerThreshold] = useState('');
-  const [stableOnly, setStableOnly] = useState(DEFAULT_SETTINGS.stableOnly);
-  // Persisted settings. Start at defaults so the static-export HTML matches the first
-  // client render; a mount effect then hydrates from storage.
-  const [stabilityCount, setStabilityCount] = useState(DEFAULT_SETTINGS.stabilityCount);
-  const [hysteresisPct, setHysteresisPct] = useState(DEFAULT_SETTINGS.hysteresisPct);
-  const [preserveOnModeChange, setPreserveOnModeChange] = useState(DEFAULT_SETTINGS.preserveOnModeChange);
-  const [noDataWarning, setNoDataWarning] = useState(DEFAULT_SETTINGS.noDataWarning);
-  const [noDataAudio, setNoDataAudio] = useState(DEFAULT_SETTINGS.noDataAudio);
-  const [capNoPartFloor, setCapNoPartFloor] = useState(DEFAULT_SETTINGS.capNoPartFloor);
-  const [verdictAudio, setVerdictAudio] = useState(DEFAULT_SETTINGS.verdictAudio);
   // Pass/Fail entry, held as the operator's raw strings so SI forms survive typing
   // (`4.5k` must not be mangled on its way through `4.`). Parsed on demand.
   const [pfReference, setPfReference] = useState('');
@@ -161,9 +193,6 @@ export default function Home() {
   const [engine] = useState<CaptureEngine>(() => new CaptureEngine(store));
   const [sessionStats, setSessionStats] = useState<SessionStats | null>(null);
 
-  const autoScaleRef = useRef(autoScale);
-  // Mirror of timeRange read synchronously in the async read loop (skip cap in 'all').
-  const timeRangeRef = useRef(timeRange);
   const verdictAudioRef = useRef(verdictAudio);
   // One beeper for the component's life; created client-side, disposed on unmount.
   // Declared here rather than beside its effect because handleReadings (defined below)
@@ -175,8 +204,6 @@ export default function Home() {
     setRecording(v);
   }, [engine]);
 
-  useEffect(() => { autoScaleRef.current = autoScale; }, [autoScale]);
-  useEffect(() => { timeRangeRef.current = timeRange; }, [timeRange]);
   useEffect(() => { engine.setTriggerArmed(triggerArmed); }, [engine, triggerArmed]);
   useEffect(() => { engine.setTriggerThreshold(toFinite(triggerThreshold)); }, [engine, triggerThreshold]);
   useEffect(() => {
@@ -197,42 +224,17 @@ export default function Home() {
   }, [pfTolerance]);
 
   useEffect(() => {
-    // Reads the SETTLED values, never the raw inputs. An absolute tolerance is read in
-    // the reference's own SI range (see resolveAbsoluteTolerance); percent is unitless.
-    const ref = parseSiValue(pfReferenceSettled);
-    const tol =
-      pfToleranceMode === 'absolute'
-        ? resolveAbsoluteTolerance(pfToleranceSettled, ref)
-        : parseSiValue(pfToleranceSettled);
-    engine.setPassFailConfig(
-      ref,
-      tol,
-      ref !== null && tol !== null ? resolveBand(ref, tol, pfToleranceMode) : null,
-      pfToleranceMode,
-    );
+    // Reads the SETTLED values, never the raw inputs.
+    const { ref, tol, band } = parseEntry(pfReferenceSettled, pfToleranceSettled, pfToleranceMode);
+    engine.setPassFailConfig(ref, tol, band, pfToleranceMode);
   }, [engine, pfReferenceSettled, pfToleranceSettled, pfToleranceMode]);
 
   // One-shot hydration from localStorage. setState-in-effect is intentional: the first
-  // render must use defaults to match the static-export HTML.
+  // render must use defaults to match the static-export HTML. Restoring is deliberately
+  // inert: no setting starts logging, arms the trigger, or opens a port.
   useEffect(() => {
-    const s = loadSettings();
-    /* eslint-disable react-hooks/set-state-in-effect -- intentional one-shot hydration */
-    setStabilityCount(s.stabilityCount);
-    setHysteresisPct(s.hysteresisPct);
-    setPreserveOnModeChange(s.preserveOnModeChange);
-    setNoDataWarning(s.noDataWarning);
-    setNoDataAudio(s.noDataAudio);
-    setCapNoPartFloor(s.capNoPartFloor);
-    setVerdictAudio(s.verdictAudio);
-    // Presentation + connection preferences. Restoring these is deliberately inert: none
-    // of them starts logging, arms the trigger, or opens a port.
-    setBaud(s.baud);
-    setTimeRange(s.timeRange);
-    setAutoScale(s.autoScale);
-    setRangeMin(s.rangeMin);
-    setRangeMax(s.rangeMax);
-    setStableOnly(s.stableOnly);
-    /* eslint-enable react-hooks/set-state-in-effect */
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot hydration
+    setSettings(loadSettings());
   }, []);
 
   // Persist on change. Skip the first invocation (mount, still defaults) so we don't
@@ -240,16 +242,8 @@ export default function Home() {
   const persistReadyRef = useRef(false);
   useEffect(() => {
     if (!persistReadyRef.current) { persistReadyRef.current = true; return; }
-    saveSettings({
-      stabilityCount, hysteresisPct, preserveOnModeChange, noDataWarning, noDataAudio,
-      capNoPartFloor, verdictAudio,
-      baud, timeRange, autoScale, rangeMin, rangeMax, stableOnly,
-    });
-  }, [
-    stabilityCount, hysteresisPct, preserveOnModeChange, noDataWarning, noDataAudio,
-    capNoPartFloor, verdictAudio,
-    baud, timeRange, autoScale, rangeMin, rangeMax, stableOnly,
-  ]);
+    saveSettings(settings);
+  }, [settings]);
 
   // The URL hash is the source of truth for the active view: it survives a reload, gives
   // browser Back/Forward between views for free, and makes a view deep-linkable. Read only
@@ -453,11 +447,11 @@ export default function Home() {
     setRec(!engine.recording, true);
   }, [engine, setRec]);
   const handleStableOnlyChange = useCallback((v: boolean) => {
-    setStableOnly(v);
+    updateSettings({ stableOnly: v });
     // Enabling the filter auto-starts logging (mirrors the Record button);
     // disabling only stops filtering and leaves logging as-is.
     if (v) setRec(true);
-  }, [setRec]);
+  }, [setRec, updateSettings]);
 
   // Per-row note edit: annotation only — never touches the reading or statistics. Keyed on
   // `seq`, which survives retention trimming, so a note cannot migrate to another row. The
@@ -548,36 +542,7 @@ export default function Home() {
 
   return (
     <div className="flex h-full flex-col bg-canvas">
-      {/* ── Header ── */}
-      <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-canvas px-5">
-        {/* Logo */}
-        <div className="flex items-center gap-2.5">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="22,12 18,12 15,21 9,3 6,12 2,12" />
-          </svg>
-          <span className="text-sm font-semibold text-fg">Multimeter Visualizer</span>
-        </div>
-
-        {/* Connection status */}
-        <div className="flex items-center gap-2 text-sm">
-          <span className={clsx('h-2 w-2 rounded-full', STATUS_DOT[status])} />
-          <span className={status === 'connected' ? 'text-success' : 'text-muted'}>
-            {STATUS_LABEL[status]}
-          </span>
-          {status === 'connected' && (
-            <span className="text-muted">
-              UART &nbsp;·&nbsp; {baud} bps
-            </span>
-          )}
-        </div>
-
-        {/* Actions */}
-        <div className="flex items-center gap-2">
-          <button className="flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted transition-colors hover:bg-surface hover:text-fg">
-            <MoreVertical size={14} />
-          </button>
-        </div>
-      </header>
+      <AppHeader status={status} baud={baud} />
 
       {/* ── Body ── */}
       <div className="flex min-h-0 flex-1">
@@ -585,7 +550,7 @@ export default function Home() {
         <Sidebar
           status={status}
           baud={baud}
-          onBaudChange={setBaud}
+          onBaudChange={(v) => updateSettings({ baud: v })}
           onConnect={handleConnect}
           onDisconnect={disconnect}
           error={error}
@@ -615,7 +580,7 @@ export default function Home() {
                   yMin={effectiveYMin}
                   yMax={effectiveYMax}
                   timeRange={timeRange}
-                  onTimeRangeChange={setTimeRange}
+                  onTimeRangeChange={(v) => updateSettings({ timeRange: v })}
                   binWidth={binWidth}
                   centerValue={centerValue}
                 />
@@ -626,12 +591,12 @@ export default function Home() {
             {/* Right panel */}
             <Controls
               rangeMin={rangeMin}
-            rangeInvalid={rangeInvalid}
               rangeMax={rangeMax}
-              onRangeMinChange={setRangeMin}
-              onRangeMaxChange={setRangeMax}
+              rangeInvalid={rangeInvalid}
+              onRangeMinChange={(v) => updateSettings({ rangeMin: v })}
+              onRangeMaxChange={(v) => updateSettings({ rangeMax: v })}
               autoScale={autoScale}
-              onAutoScaleChange={setAutoScale}
+              onAutoScaleChange={(v) => updateSettings({ autoScale: v })}
               triggerThreshold={triggerThreshold}
               onTriggerThresholdChange={setTriggerThreshold}
               triggerArmed={triggerArmed}
@@ -644,7 +609,7 @@ export default function Home() {
               stableOnly={stableOnly}
               onStableOnlyChange={handleStableOnlyChange}
               onClear={requestClear}
-            canClear={sampleCount > 0}
+              canClear={sampleCount > 0}
               onExportCsv={exportCsv}
               canExport={canExport}
             />
@@ -682,22 +647,7 @@ export default function Home() {
             onExportCsv={exportVerdictCsv}
           />
         ) : (
-          <Settings
-            stabilityCount={stabilityCount}
-            onStabilityCountChange={setStabilityCount}
-            hysteresisPct={hysteresisPct}
-            onHysteresisPctChange={setHysteresisPct}
-            preserveOnModeChange={preserveOnModeChange}
-            onPreserveOnModeChangeChange={setPreserveOnModeChange}
-            noDataWarning={noDataWarning}
-            onNoDataWarningChange={setNoDataWarning}
-            noDataAudio={noDataAudio}
-            onNoDataAudioChange={setNoDataAudio}
-            capNoPartFloor={capNoPartFloor}
-            onCapNoPartFloorChange={setCapNoPartFloor}
-            verdictAudio={verdictAudio}
-            onVerdictAudioChange={setVerdictAudio}
-          />
+          <Settings settings={settings} onChange={updateSettings} />
         )}
       </div>
 

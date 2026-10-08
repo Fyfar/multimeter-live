@@ -39,6 +39,26 @@ export function ActionButton({
   );
 }
 
+export function RecordButton({
+  recording,
+  canRecord,
+  onToggle,
+}: {
+  recording: boolean;
+  canRecord: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <ActionButton
+      onClick={onToggle}
+      icon={recording ? <Square size={12} /> : <Play size={12} />}
+      label={recording ? 'Stop Logging' : 'Start Logging'}
+      variant={recording ? 'danger' : 'success'}
+      disabled={!recording && !canRecord}
+    />
+  );
+}
+
 export function Controls({
   rangeMin,
   rangeMax,
@@ -171,13 +191,7 @@ export function Controls({
           </div>
 
           <div className="space-y-1.5">
-            <ActionButton
-              onClick={onToggleRecord}
-              icon={recording ? <Square size={12} /> : <Play size={12} />}
-              label={recording ? 'Stop Logging' : 'Start Logging'}
-              variant={recording ? 'danger' : 'success'}
-              disabled={!recording && !canRecord}
-            />
+            <RecordButton recording={recording} canRecord={canRecord} onToggle={onToggleRecord} />
             <ActionButton
               onClick={onExportCsv}
               icon={<Download size={12} />}

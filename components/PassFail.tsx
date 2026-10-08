@@ -8,7 +8,7 @@ import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { normalizeReading, readingResolution, type Reading } from '@/lib/parser';
 import {
   ENTRY_UNITS, entryToBase, formatEntryValue, isBandTooWide, isPlausibleReference,
-  judge, parseSiValue, resolveAbsoluteTolerance, resolveBand,
+  judge, parseEntry, summarizeBatch,
   type SupportedMode, type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
 import { formatSiValue, siPrefixOf } from '@/lib/si';
@@ -96,6 +96,39 @@ function EntryField({
   );
 }
 
+function UnsupportedMode() {
+  return (
+    <main className="min-w-0 flex-1 overflow-y-auto p-5">
+      <div className="mx-auto max-w-lg pt-16 text-center">
+        <h2 className="mb-2 text-lg font-semibold text-fg">Pass/Fail</h2>
+        <p className="text-sm leading-relaxed text-muted">
+          Pass/Fail testing is available in <strong className="text-fg">Resistance</strong>,{' '}
+          <strong className="text-fg">Diode</strong> and{' '}
+          <strong className="text-fg">Capacitance</strong> modes.
+        </p>
+        <p className="mt-3 text-xs leading-relaxed text-muted">
+          Voltage and Current are excluded because lifting the probes reads a small
+          number rather than <span className="font-mono">OL</span>, so there is no
+          reliable way to tell one part from the next. Continuity is excluded because
+          the meter&rsquo;s own buzzer already is the pass/fail indicator.
+        </p>
+        <p className="mt-3 text-xs text-muted">
+          Turn the meter&rsquo;s dial to a supported mode to begin.
+        </p>
+      </div>
+    </main>
+  );
+}
+
+function Tile({ value, label, className }: { value: React.ReactNode; label: string; className?: string }) {
+  return (
+    <div className="rounded-md border border-border py-2 text-center">
+      <div className={clsx('font-mono', className ?? 'text-base text-fg')}>{value}</div>
+      <div className="text-[10px] uppercase tracking-wide text-muted">{label}</div>
+    </div>
+  );
+}
+
 export function PassFail({
   reading,
   stable,
@@ -134,19 +167,12 @@ export function PassFail({
   // Parsed on read, not on keystroke (see EntryField).
   // Everything below reads the SETTLED (debounced) values, never the live inputs: typing
   // "10" passes through "1", so a 10% tolerance would flash FAIL at 1% on the way.
-  const refEntry = parseSiValue(referenceSettled);
+  const { ref: refEntry, tol: tolEntry, band: bandEntry } =
+    parseEntry(referenceSettled, toleranceSettled, toleranceMode);
   // An absolute tolerance is read in the REFERENCE's SI range (a bare `30` against a
   // `300p` reference = 30 pF); the field's unit label shows that range.
-  const tolPrefix = toleranceMode === 'absolute' ? siPrefixOf(refEntry) : null;
   const toleranceUnitLabel =
-    toleranceMode === 'percent' ? '%' : `${tolPrefix?.symbol ?? ''}${entryUnit}`;
-  const tolEntry =
-    toleranceMode === 'absolute'
-      ? resolveAbsoluteTolerance(toleranceSettled, refEntry)
-      : parseSiValue(toleranceSettled);
-  const bandEntry = refEntry !== null && tolEntry !== null
-    ? resolveBand(refEntry, tolEntry, toleranceMode)
-    : null;
+    toleranceMode === 'percent' ? '%' : `${siPrefixOf(refEntry).symbol}${entryUnit}`;
 
   // Validity uses the settled value too, so a field doesn't flash red mid-typing.
   const refInvalid = referenceSettled.trim() !== '' && refEntry === null;
@@ -185,39 +211,9 @@ export function PassFail({
     mode !== null && bandEntry !== null && lsd !== null &&
     bandEntry * toBase < lsd;
 
-  // Yield over the whole table; the value spread only over the rows captured since the last
-  // mode change. With "Keep log on mode change" on, the table can hold several modes, and a
-  // mean of ohms and volts is meaningless — the same split the Dashboard makes between the
-  // log (everything) and the chart and statistics (current unit only). Every mode change
-  // switches `mode`, so the trailing run of rows in the current mode is one unit's rows. A
-  // detour through another mode that captured nothing leaves the run unbroken — same unit, fine.
-  //
   // Memoized: this component re-renders on every serial batch while `rows` is unbounded,
   // so an unmemoized scan here is O(n) work many times a second.
-  const summary = useMemo(() => {
-    if (rows.length === 0) return null;
-    let passed = 0;
-    for (const r of rows) if (r.verdict === 'PASS') passed += 1;
-    let from = rows.length;
-    while (from > 0 && rows[from - 1].mode === mode) from -= 1;
-    let mean = 0, m2 = 0, min = Infinity, max = -Infinity, count = 0;
-    // Coarsest LSD across the CAPTURED rows (not every live reading) — same "coarsest
-    // seen" idea as the engine's recordedResolution, scoped to this batch so it clears
-    // with Clear Batch instead of needing its own reset.
-    let resolution: number | null = null;
-    for (let i = from; i < rows.length; i++) {
-      const r = rows[i];
-      count += 1;
-      const delta = r.baseValue - mean;
-      mean += delta / count;
-      m2 += delta * (r.baseValue - mean);
-      if (r.baseValue < min) min = r.baseValue;
-      if (r.baseValue > max) max = r.baseValue;
-      if (r.resolution !== null) resolution = Math.max(resolution ?? 0, r.resolution);
-    }
-    return { stats: count > 0 ? { count, mean, m2, min, max } : null, passed,
-             failed: rows.length - passed, yieldPct: (passed / rows.length) * 100, resolution };
-  }, [rows, mode]);
+  const summary = useMemo(() => summarizeBatch(rows, mode), [rows, mode]);
 
   // Memoized for the same reason: a fresh 500-element array per batch makes React
   // reconcile 500 children each time (memo on VRow saves the render, not the diff).
@@ -240,29 +236,7 @@ export function PassFail({
           : `${fmtDeviation(baseUnit, deviation, lsd)} from reference`;
 
   // Unsupported mode: no controls, no capture, just an explanation.
-  if (mode === null) {
-    return (
-      <main className="min-w-0 flex-1 overflow-y-auto p-5">
-        <div className="mx-auto max-w-lg pt-16 text-center">
-          <h2 className="mb-2 text-lg font-semibold text-fg">Pass/Fail</h2>
-          <p className="text-sm leading-relaxed text-muted">
-            Pass/Fail testing is available in <strong className="text-fg">Resistance</strong>,{' '}
-            <strong className="text-fg">Diode</strong> and{' '}
-            <strong className="text-fg">Capacitance</strong> modes.
-          </p>
-          <p className="mt-3 text-xs leading-relaxed text-muted">
-            Voltage and Current are excluded because lifting the probes reads a small
-            number rather than <span className="font-mono">OL</span>, so there is no
-            reliable way to tell one part from the next. Continuity is excluded because
-            the meter&rsquo;s own buzzer already is the pass/fail indicator.
-          </p>
-          <p className="mt-3 text-xs text-muted">
-            Turn the meter&rsquo;s dial to a supported mode to begin.
-          </p>
-        </div>
-      </main>
-    );
-  }
+  if (mode === null) return <UnsupportedMode />;
 
   return (
     <main className="flex min-w-0 flex-1 gap-4 overflow-hidden p-5">
@@ -455,26 +429,12 @@ export function PassFail({
         {/* Yield */}
         <section className="space-y-3 rounded-lg border border-border bg-panel p-4">
           <h3 className="text-xs font-semibold text-fg">Batch</h3>
-          <div className="grid grid-cols-3 gap-2 text-center">
-            <div className="rounded-md border border-border py-2">
-              <div className="font-mono text-base text-fg">{rows.length}</div>
-              <div className="text-[10px] uppercase tracking-wide text-muted">Tested</div>
-            </div>
-            <div className="rounded-md border border-border py-2">
-              <div className="font-mono text-base text-success">{summary?.passed ?? 0}</div>
-              <div className="text-[10px] uppercase tracking-wide text-muted">Pass</div>
-            </div>
-            <div className="rounded-md border border-border py-2">
-              <div className="font-mono text-base text-danger">{summary?.failed ?? 0}</div>
-              <div className="text-[10px] uppercase tracking-wide text-muted">Fail</div>
-            </div>
+          <div className="grid grid-cols-3 gap-2">
+            <Tile value={rows.length} label="Tested" />
+            <Tile value={summary?.passed ?? 0} label="Pass" className="text-base text-success" />
+            <Tile value={summary?.failed ?? 0} label="Fail" className="text-base text-danger" />
           </div>
-          {summary && (
-            <div className="rounded-md border border-border py-2 text-center">
-              <div className="font-mono text-lg text-fg">{summary.yieldPct.toFixed(1)}%</div>
-              <div className="text-[10px] uppercase tracking-wide text-muted">Yield</div>
-            </div>
-          )}
+          {summary && <Tile value={`${summary.yieldPct.toFixed(1)}%`} label="Yield" className="text-lg text-fg" />}
           <ActionButton
             onClick={onClear}
             icon={<Trash2 size={13} />}

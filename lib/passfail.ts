@@ -6,6 +6,7 @@
 import { SCALE, type Mode } from './parser.ts';
 import { siPrefixOf } from './si.ts';
 import { csvEsc } from './csv.ts';
+import type { SessionStats } from './capture.ts';
 
 // ---------------------------------------------------------------- SI value parsing
 
@@ -202,6 +203,15 @@ export function resolveBand(
   return isBandTooWide(reference, tolerance, mode) ? null : band;
 }
 
+/** The operator's entry, parsed. Shared by the engine's config and the view, so the band
+ *  on screen is always the band being judged. */
+export function parseEntry(reference: string, tolerance: string, mode: ToleranceMode) {
+  const ref = parseSiValue(reference);
+  const tol = mode === 'absolute' ? resolveAbsoluteTolerance(tolerance, ref) : parseSiValue(tolerance);
+  const band = ref !== null && tol !== null ? resolveBand(ref, tol, mode) : null;
+  return { ref, tol, band };
+}
+
 /**
  * PASS when |measured − reference| is within the band, edge inclusive. The epsilon buys
  * that inclusivity: a float-computed band can land a hair under the exact edge, and a
@@ -239,6 +249,38 @@ export interface VerdictRow {
    *  in, so it matches the Data Log export row for row. */
   unit: string;
   decimals: number;
+}
+
+// --------------------------------------------------------------- batch summary
+
+/**
+ * Yield over the whole batch; the value spread only over the trailing run of rows in `mode`.
+ * With "Keep log on mode change" on, the batch can hold several modes, and a mean of ohms and
+ * volts is meaningless. A detour through another mode that captured nothing leaves the run
+ * unbroken — same unit, fine. `resolution` is the coarsest LSD across that run, so it clears
+ * with Clear Batch instead of needing its own reset.
+ */
+export function summarizeBatch(rows: readonly VerdictRow[], mode: SupportedMode | null) {
+  if (rows.length === 0) return null;
+  let passed = 0;
+  for (const r of rows) if (r.verdict === 'PASS') passed += 1;
+  let from = rows.length;
+  while (from > 0 && rows[from - 1].mode === mode) from -= 1;
+
+  let mean = 0, m2 = 0, min = Infinity, max = -Infinity, count = 0;
+  let resolution: number | null = null;
+  for (let i = from; i < rows.length; i++) {
+    const r = rows[i];
+    count += 1;
+    const delta = r.baseValue - mean;
+    mean += delta / count;
+    m2 += delta * (r.baseValue - mean);
+    if (r.baseValue < min) min = r.baseValue;
+    if (r.baseValue > max) max = r.baseValue;
+    if (r.resolution !== null) resolution = Math.max(resolution ?? 0, r.resolution);
+  }
+  const stats: SessionStats | null = count > 0 ? { count, mean, m2, min, max } : null;
+  return { stats, passed, failed: rows.length - passed, yieldPct: (passed / rows.length) * 100, resolution };
 }
 
 // ------------------------------------------------------------------- CSV export

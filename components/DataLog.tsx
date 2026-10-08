@@ -1,14 +1,14 @@
 'use client';
 
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
-import { Search, Download, Square, Play, Trash2 } from 'lucide-react';
+import { Search, Download, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { MODE_LABELS, SCALE, type Mode, type Reading, displayUnit } from '@/lib/parser';
 import { MODES, UNITS, type SampleStore } from '@/lib/samples';
 import { couldMatchIso, couldMatchValue, createIsoFormatter, localIso } from '@/lib/search';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
 import type { SessionStats } from '@/lib/capture';
-import { ActionButton } from '@/components/Controls';
+import { ActionButton, RecordButton } from '@/components/Controls';
 
 /**
  * Exactly what one rendered row needs, as SCALARS. Deliberately not the store's `Sample`
@@ -377,13 +377,7 @@ export function DataLog({
           <div>
             <h3 className="mb-3 text-xs font-semibold text-fg">Logging</h3>
             <div className="space-y-1.5">
-              <ActionButton
-                onClick={onToggleRecord}
-                icon={recording ? <Square size={12} /> : <Play size={12} />}
-                label={recording ? 'Stop Logging' : 'Start Logging'}
-                variant={recording ? 'danger' : 'success'}
-                disabled={!recording && !canRecord}
-              />
+              <RecordButton recording={recording} canRecord={canRecord} onToggle={onToggleRecord} />
               <ActionButton
                 onClick={onClear}
                 icon={<Trash2 size={12} />}

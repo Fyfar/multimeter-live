@@ -118,7 +118,7 @@ function buildChartConfig(
           {
             label: 'samples',
             data: [],
-            backgroundColor: 'rgba(59,130,246,0.6)',
+            backgroundColor: IN_RANGE_COLOR,
             borderColor: '#3b82f6',
             borderWidth: 1,
             categoryPercentage: 1,
@@ -336,6 +336,52 @@ function buildChartConfig(
   };
 }
 
+function drawHistogram(
+  chart: Chart,
+  counts: Map<number, number>,
+  unit: string,
+  binWidth: number | undefined,
+  centerValue: number | undefined,
+): void {
+  // Counts per distinct value, accumulated as entries are recorded — NOT a re-bin of
+  // the stored samples, which is what keeps a multi-day distribution affordable. Fed by
+  // the same `logSample` gate as everything else, so the bars always total the session's
+  // sample count. They have no time dimension, though, so the distribution covers the
+  // whole recording session even after retention has dropped the oldest samples from the
+  // table and the CSV. (OL and no-part readings are excluded upstream, as everywhere.)
+  const entries: Entry[] = [...counts];
+  const { bins, width } = buildHistogram(entries, binWidth, centerValue);
+  // One prefix for the whole axis (in the title), same rule as the line y-axis. No unit
+  // yet -> plain base-unit numbers, so the pre-session window reads as it always did.
+  let extent = 0;
+  for (const b of bins) extent = Math.max(extent, Math.abs(b.value));
+  const axis = unit
+    ? siAxisScale(unit, extent, width)
+    : { scale: 1, decimals: resolutionDecimals(width), unit: displayUnit(unit) };
+  const edge = { under: '< ', in: '', over: '> ' };
+
+  chart.data.labels = bins.map(
+    (b) => edge[b.kind] + (toPhysicalUnit(unit, b.value) / axis.scale).toFixed(axis.decimals),
+  );
+  chart.data.datasets[0].data = bins.map((b) => b.count);
+  // Per-bar color so under-/over-range outlier bins read as distinct (amber).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (chart.data.datasets[0] as any).backgroundColor = bins.map((b) =>
+    b.kind === 'in' ? IN_RANGE_COLOR : OUTLIER_COLOR,
+  );
+
+  const yScale = chart.options.scales?.y as { min?: number; max?: number } | undefined;
+  if (yScale) {
+    // Counts only grow — always auto-scale the y-axis.
+    yScale.min = undefined;
+    yScale.max = undefined;
+  }
+  const xScale = chart.options.scales?.x as { title?: { text?: string } } | undefined;
+  if (xScale?.title) xScale.title.text = axis.unit;
+
+  chart.update('none');
+}
+
 export function RealtimeChart({
   store,
   sampleVersion,
@@ -446,49 +492,12 @@ export function RealtimeChart({
     if (!chart || lineUnavailable) return;
 
     if (chartType === 'histogram') {
-      // Counts per distinct value, accumulated as entries are recorded — NOT a re-bin of
-      // the stored samples, which is what keeps a multi-day distribution affordable. Fed by
-      // the same `logSample` gate as everything else, so the bars always total the session's
-      // sample count. They have no time dimension, though, so the distribution covers the
-      // whole recording session even after retention has dropped the oldest samples from the
-      // table and the CSV. (OL and no-part readings are excluded upstream, as everywhere.)
-      const entries: Entry[] = [...counts];
-      const { bins, width } = buildHistogram(entries, binWidth, centerValue);
-      // One prefix for the whole axis (in the title), same rule as the line y-axis. No unit
-      // yet -> plain base-unit numbers, so the pre-session window reads as it always did.
-      let extent = 0;
-      for (const b of bins) extent = Math.max(extent, Math.abs(b.value));
-      const axis = unit
-        ? siAxisScale(unit, extent, width)
-        : { scale: 1, decimals: resolutionDecimals(width), unit: displayUnit(unit) };
-      const edge = { under: '< ', in: '', over: '> ' };
-
-      chart.data.labels = bins.map(
-        (b) => edge[b.kind] + (toPhysicalUnit(unit, b.value) / axis.scale).toFixed(axis.decimals),
-      );
-      chart.data.datasets[0].data = bins.map((b) => b.count);
-      // Per-bar color so under-/over-range outlier bins read as distinct (amber).
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (chart.data.datasets[0] as any).backgroundColor = bins.map((b) =>
-        b.kind === 'in' ? IN_RANGE_COLOR : OUTLIER_COLOR,
-      );
-
-      const yScale = chart.options.scales?.y as { min?: number; max?: number } | undefined;
-      if (yScale) {
-        // Counts only grow — always auto-scale the y-axis.
-        yScale.min = undefined;
-        yScale.max = undefined;
-      }
-      const xScale = chart.options.scales?.x as { title?: { text?: string } } | undefined;
-      if (xScale?.title) xScale.title.text = axis.unit;
-
-      chart.update('none');
+      drawHistogram(chart, counts, unit, binWidth, centerValue);
       return;
     }
 
     const now = Date.now();
     nowRef.current = now; // what the tick and tooltip labels are offsets from
-    unitRef.current = unit; // what the y-axis tick callback appends
     const windowMs = TIME_RANGE_MS[timeRange];
     const tier = tierRef.current;
     // Physical index the chart may start at. A preserve-log mode change advances the
@@ -675,11 +684,10 @@ export function RealtimeChart({
                 <button
                   key={r}
                   onClick={() => onTimeRangeChange(r)}
-                  className={`px-3 py-1 text-xs font-medium transition-colors ${
-                    timeRange === r
-                      ? 'bg-accent text-white'
-                      : 'text-muted hover:bg-surface hover:text-fg'
-                  }`}
+                  className={clsx(
+                    'px-3 py-1 text-xs font-medium transition-colors',
+                    timeRange === r ? 'bg-accent text-white' : 'text-muted hover:bg-surface hover:text-fg',
+                  )}
                 >
                   {r}
                 </button>
@@ -700,7 +708,7 @@ export function RealtimeChart({
               That filter records one entry per settled measurement, so entries can be minutes
               apart. A line drawn between two of them would claim the value was held in
               between, when the meter was measuring something else — a probe lift, or the next
-              The histogram plots the recorded entries, so a batch of parts reads as a
+              part. The histogram plots the recorded entries, so a batch of parts reads as a
               distribution of their measured values.
             </p>
             <button

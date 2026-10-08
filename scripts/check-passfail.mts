@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   parseSiValue, entryToBase, ENTRY_UNITS, formatEntryValue, isPlausibleReference,
   isSupportedMode, resolveBand, isBandTooWide, judge, SUPPORTED_MODES,
-  parseSiEntry, resolveAbsoluteTolerance, verdictCsvLine, type VerdictRow,
+  parseSiEntry, resolveAbsoluteTolerance, verdictCsvLine, summarizeBatch, type VerdictRow,
 } from '../lib/passfail.ts';
 
 let checks = 0;
@@ -202,5 +202,20 @@ eq([cap[2], cap[3], cap[4], cap[6]].join(' '), '470.0 nF 470 0', 'capacitance in
 const uf = csvCols(vrow('CAPACITANCE', 4700.1, 4700, 'uF', 4));
 eq([uf[2], uf[3], uf[4], uf[6]].join(' '), '4.7001 uF 4.7 0.0001', 'µF range: no nF -> F division noise');
 eq(csvCols(vrow('DIODE', 0.652, 0.65, 'V', 3, '0.01'))[5], '±10 mV', 'absolute tolerance column unchanged');
+
+// --- batch summary: yield over every row, spread over the trailing run in the live mode ---
+const sr = (mode: VerdictRow['mode'], v: number, verdict: 'PASS' | 'FAIL', resolution: number | null) =>
+  ({ ...vrow(mode, v, v, 'OM', 0), verdict, resolution });
+const batch = [
+  sr('RESISTANCE', 100, 'PASS', 1), sr('DIODE', 0.6, 'FAIL', 0.001),
+  sr('RESISTANCE', 10, 'PASS', 0.1), sr('RESISTANCE', 30, 'FAIL', 0.01),
+];
+const sum = summarizeBatch(batch, 'RESISTANCE')!;
+eq(`${sum.passed}/${sum.failed}/${sum.yieldPct}`, '2/2/50', 'yield counts every mode');
+eq(sum.stats?.count, 2, 'spread stops at the earlier DIODE row: the 100 Ω row is excluded');
+close(sum.stats!.mean, 20, 'mean of the trailing run');
+eq(sum.resolution, 0.1, 'coarsest LSD of the run, not of the whole batch');
+eq(summarizeBatch(batch, 'CAPACITANCE')?.stats, null, 'live mode has no rows -> no spread, yield kept');
+eq(summarizeBatch([], 'RESISTANCE'), null, 'empty batch');
 
 console.log(`check-passfail: ${checks} assertions passed`);
