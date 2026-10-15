@@ -67,16 +67,26 @@ const OUTLIER_COLOR = 'rgba(245,158,11,0.7)';  // amber — under/over-range bin
  */
 const ALL_INITIAL_BUCKET_MS = 50;
 
-const AXIS_COLOR = '#8b949e';
-const GRID_COLOR = 'rgba(48,54,61,0.5)';
+export type Theme = 'dark' | 'light';
+
+// Canvas colors cannot follow the CSS tokens, so the neutrals are mirrored here per theme
+// (globals.css owns the source values). Dataset colors are semantic and never change.
+const CHART_NEUTRALS: Record<Theme, {
+  axis: string; grid: string; tooltipBg: string; tooltipBorder: string; tooltipTitle: string;
+}> = {
+  dark: {
+    axis: '#8b949e', grid: 'rgba(48,54,61,0.5)',
+    tooltipBg: '#1c2128', tooltipBorder: '#30363d', tooltipTitle: '#f0f6fc',
+  },
+  light: {
+    axis: '#59636e', grid: 'rgba(208,215,222,0.6)',
+    tooltipBg: '#ffffff', tooltipBorder: '#d0d7de', tooltipTitle: '#1f2328',
+  },
+};
 const MONO_FONT = { size: 11, family: 'var(--font-geist-mono)' };
 
 const TOOLTIP_STYLE = {
-  backgroundColor: '#1c2128',
-  borderColor: '#30363d',
   borderWidth: 1,
-  titleColor: '#f0f6fc',
-  bodyColor: AXIS_COLOR,
   titleFont: { family: 'var(--font-geist-mono)', size: 11 },
   bodyFont: { family: 'var(--font-geist-mono)', size: 12 },
   padding: 8,
@@ -108,7 +118,17 @@ function buildChartConfig(
   nowRef: { current: number },
   unitRef: { current: string },
   binWidthRef: { current: number | undefined },
+  theme: Theme,
 ): ChartConfiguration {
+  const { axis: axisColor, grid: gridColor, tooltipBg, tooltipBorder, tooltipTitle } =
+    CHART_NEUTRALS[theme];
+  const tooltipStyle = {
+    ...TOOLTIP_STYLE,
+    backgroundColor: tooltipBg,
+    borderColor: tooltipBorder,
+    titleColor: tooltipTitle,
+    bodyColor: axisColor,
+  };
   if (isHistogram) {
     return {
       type: 'bar',
@@ -133,22 +153,22 @@ function buildChartConfig(
         interaction: { intersect: false, mode: 'index' },
         scales: {
           x: {
-            title: { display: true, text: displayUnit(unit), color: AXIS_COLOR, font: { size: 11 } },
-            ticks: { color: AXIS_COLOR, maxTicksLimit: 9, maxRotation: 0, minRotation: 0, font: MONO_FONT },
-            grid: { color: GRID_COLOR },
-            border: { color: GRID_COLOR },
+            title: { display: true, text: displayUnit(unit), color: axisColor, font: { size: 11 } },
+            ticks: { color: axisColor, maxTicksLimit: 9, maxRotation: 0, minRotation: 0, font: MONO_FONT },
+            grid: { color: gridColor },
+            border: { color: gridColor },
           },
           y: {
-            title: { display: true, text: 'Samples', color: AXIS_COLOR, font: { size: 11 } },
+            title: { display: true, text: 'Samples', color: axisColor, font: { size: 11 } },
             beginAtZero: true,
-            ticks: { color: AXIS_COLOR, font: MONO_FONT },
-            grid: { color: GRID_COLOR },
-            border: { color: GRID_COLOR },
+            ticks: { color: axisColor, font: MONO_FONT },
+            grid: { color: gridColor },
+            border: { color: gridColor },
           },
         },
         plugins: {
           legend: { display: false },
-          tooltip: TOOLTIP_STYLE,
+          tooltip: tooltipStyle,
         },
       },
     };
@@ -264,7 +284,7 @@ function buildChartConfig(
               .map((value) => ({ value }));
           },
           ticks: {
-            color: AXIS_COLOR,
+            color: axisColor,
             maxTicksLimit: 9,
             maxRotation: 0,
             minRotation: 0,
@@ -275,8 +295,8 @@ function buildChartConfig(
                 : (value as string);
             },
           },
-          grid: { color: GRID_COLOR },
-          border: { color: GRID_COLOR },
+          grid: { color: gridColor },
+          border: { color: gridColor },
         },
         y: {
           // The unit goes on the TICKS, not in a scale title. Chart.js v4 has no rotation
@@ -286,7 +306,7 @@ function buildChartConfig(
           title: { display: false },
           beginAtZero: false,
           ticks: {
-            color: AXIS_COLOR,
+            color: axisColor,
             font: MONO_FONT,
             // One shared SI prefix per redraw, chosen from the visible extent (never from
             // an individual tick's own rounded value — see design.md's no-rounding rule)
@@ -309,14 +329,14 @@ function buildChartConfig(
               return unitLabel ? `${text} ${unitLabel}` : text;
             },
           },
-          grid: { color: GRID_COLOR },
-          border: { color: GRID_COLOR },
+          grid: { color: gridColor },
+          border: { color: gridColor },
         },
       },
       plugins: {
         legend: { display: false },
         tooltip: {
-          ...TOOLTIP_STYLE,
+          ...tooltipStyle,
           // Dataset 1 (the out-of-range markers) is for drawing, not for reading. Without
           // this, `interaction.mode: 'index'` takes the element at the SAME INDEX in every
           // dataset — and dataset 1 is a short, separately-indexed array, so hovering any
@@ -397,6 +417,7 @@ export function RealtimeChart({
   binWidth,
   centerValue,
   sessionStart,
+  theme,
 }: {
   /** THE canonical store. Read, never copied — this component keeps no per-sample state. */
   store: SampleStore;
@@ -436,6 +457,9 @@ export function RealtimeChart({
   /** When this session's first point arrived; null between sessions. Anchors the
    *  x-axis while the session is younger than the selected window. */
   sessionStart?: number | null;
+  /** Recreates the chart in the theme's neutrals; also a redraw dep, since a fresh chart is
+   *  empty until the update effect runs and no sample may arrive while disconnected. */
+  theme: Theme;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const chartRef = useRef<Chart | null>(null);
@@ -471,7 +495,7 @@ export function RealtimeChart({
     nowRef.current = Date.now();
     const chart = new Chart(
       canvasRef.current,
-      buildChartConfig(chartType === 'histogram', unit, nowRef, unitRef, binWidthRef),
+      buildChartConfig(chartType === 'histogram', unit, nowRef, unitRef, binWidthRef, theme),
     );
     chartRef.current = chart;
     return () => {
@@ -479,7 +503,7 @@ export function RealtimeChart({
       chartRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartType, lineUnavailable]);
+  }, [chartType, lineUnavailable, theme]);
 
   /* eslint-disable react-hooks/immutability */
   useEffect(() => {
@@ -642,7 +666,7 @@ export function RealtimeChart({
     // itself. `sampleVersion` is what actually does — including for the counts-only case,
     // where the stable filter suppresses logging but the histogram still changes.
   }, [store, sampleVersion, chartFromSeq, chartEpoch, counts, unit, yMin, yMax, timeRange,
-      chartType, binWidth, centerValue, sessionStart, lineUnavailable]);
+      chartType, binWidth, centerValue, sessionStart, lineUnavailable, theme]);
   /* eslint-enable react-hooks/immutability */
 
   return (

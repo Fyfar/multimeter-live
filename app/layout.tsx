@@ -32,6 +32,9 @@ export const metadata: Metadata = {
   },
 };
 
+// Key shared with toggleTheme in page.tsx. Anything but 'light' (or a storage throw) = dark.
+const THEME_SCRIPT = `try{if(localStorage.getItem('multimeter-live:theme')==='light')document.documentElement.dataset.theme='light'}catch(e){}`;
+
 export const viewport: Viewport = {
   themeColor: "#0d1117",
 };
@@ -45,7 +48,13 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      // The theme script below sets data-theme before hydration; the prerendered HTML has none.
+      suppressHydrationWarning
     >
+      <head>
+        {/* Runs before first paint so a stored light theme never flashes dark. */}
+        <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
+      </head>
       <body className="h-full">
         {children}
         <ServiceWorker />
