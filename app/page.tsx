@@ -1,10 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { MoreVertical } from 'lucide-react';
 import { clsx } from 'clsx';
 import { DigitalDisplay } from '@/components/DigitalDisplay';
-import { RealtimeChart } from '@/components/RealtimeChart';
+import { RealtimeChart, type Theme } from '@/components/RealtimeChart';
 import { Controls } from '@/components/Controls';
 import { Sidebar, NAV_IDS, type NavId } from '@/components/Sidebar';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
@@ -73,7 +72,9 @@ const STATUS_DOT: Record<SerialStatus, string> = {
   unsupported: 'bg-muted',
 };
 
-function AppHeader({ status, baud }: { status: SerialStatus; baud: number }) {
+function AppHeader({ status, baud, theme, onToggleTheme }: {
+  status: SerialStatus; baud: number; theme: Theme; onToggleTheme: () => void;
+}) {
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-canvas px-5">
       {/* Logo */}
@@ -99,8 +100,12 @@ function AppHeader({ status, baud }: { status: SerialStatus; baud: number }) {
 
       {/* Actions */}
       <div className="flex items-center gap-2">
-        <button className="flex h-8 w-8 items-center justify-center rounded-md border border-border text-muted transition-colors hover:bg-surface hover:text-fg">
-          <MoreVertical size={14} />
+        {/* Names the theme a click switches TO. */}
+        <button
+          onClick={onToggleTheme}
+          className="flex h-8 items-center justify-center rounded-md border border-border px-3 text-xs text-muted transition-colors hover:bg-surface hover:text-fg"
+        >
+          {theme === 'dark' ? 'Light' : 'Dark'}
         </button>
       </div>
     </header>
@@ -119,6 +124,19 @@ export default function Home() {
     baud, rangeMin, rangeMax, autoScale, timeRange, stableOnly, stabilityCount, hysteresisPct,
     preserveOnModeChange, noDataWarning, noDataAudio, capNoPartFloor, verdictAudio,
   } = settings;
+  // Starts 'dark' to match the static HTML; the mount effect reads what the pre-paint
+  // script in layout.tsx already applied, so storage is read only there.
+  const [theme, setTheme] = useState<Theme>('dark');
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot hydration
+    if (document.documentElement.dataset.theme === 'light') setTheme('light');
+  }, []);
+  const toggleTheme = useCallback(() => {
+    const next: Theme = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { window.localStorage.setItem('multimeter-live:theme', next); } catch { /* still applies this page */ }
+    setTheme(next);
+  }, [theme]);
   // The active view. Stays 'dashboard' for the first render so it matches the statically
   // exported HTML; the URL hash takes over in the mount effect below.
   const [view, setView] = useState<NavId>('dashboard');
@@ -542,7 +560,7 @@ export default function Home() {
 
   return (
     <div className="flex h-full flex-col bg-canvas">
-      <AppHeader status={status} baud={baud} />
+      <AppHeader status={status} baud={baud} theme={theme} onToggleTheme={toggleTheme} />
 
       {/* ── Body ── */}
       <div className="flex min-h-0 flex-1">
@@ -583,6 +601,7 @@ export default function Home() {
                   onTimeRangeChange={(v) => updateSettings({ timeRange: v })}
                   binWidth={binWidth}
                   centerValue={centerValue}
+                  theme={theme}
                 />
                 <StatisticsPanel stats={sessionStats} baseUnit={chartBaseUnit} resolution={binWidth} />
               </div>

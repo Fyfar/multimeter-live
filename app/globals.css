@@ -19,17 +19,27 @@
 }
 
 :root {
-  --background: #0d1117;
-  --foreground: #f0f6fc;
+  color-scheme: dark;
+}
+
+/* Light theme swaps neutrals only. success/danger (start/stop), accent and amber carry
+   meaning and stay identical in both themes. Set pre-paint by the script in layout.tsx. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-canvas: #ffffff;
+  --color-panel: #f6f8fa;
+  --color-surface: #eaeef2;
+  --color-border: #d0d7de;
+  --color-fg: #1f2328;
+  --color-muted: #59636e;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
+  background: var(--color-canvas);
+  color: var(--color-fg);
   font-family: var(--font-sans), system-ui, sans-serif;
 }
 
-/* Smooth scrollbars in dark theme */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -38,9 +48,9 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #30363d;
+  background: var(--color-border);
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #484f58;
+  background: var(--color-muted);
 }
