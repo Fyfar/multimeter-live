@@ -67,6 +67,9 @@ browser will also ask before the page goes away. You never reinstall to update.
   another, and get a beep and a verdict for each. See below.
 - **Smart capture.** Log only stable values, or arm a trigger threshold so recording
   starts and stops by itself as the signal crosses it.
+- **Light and dark themes.** Dark by default. The **Light** / **Dark** button in the
+  header switches the whole interface, chart included, instantly and without touching
+  the connection or a running recording. The choice is remembered in this browser.
 - **Installable and offline.** A PWA that reconnects to your last adapter on its own and
   needs no network once loaded.
 
