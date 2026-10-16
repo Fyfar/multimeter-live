@@ -361,6 +361,62 @@ function buildChartConfig(
   };
 }
 
+/** X-axis bounds for one line-chart update. A bounded range spans its window
+ *  (resolveTimeWindow); 'all' has no fixed window, so the axis fits the data — but "the
+ *  data" must mean the STORE's bounds, not the tier's last emitted point. A bucket emits its
+ *  min and max, and which of those is newest hops around inside the newest bucket as samples
+ *  arrive, so letting Chart.js auto-fit made the axis maximum jump every update: the whole
+ *  plot area re-laid-out and the right-hand label flickered between `Now` and `-1s`. Real
+ *  sample timestamps only ever move forward.
+ *
+ *  Never left undefined or zero-width: with no visible sample Chart.js falls back to 0..1
+ *  and the ticks read as minus the Unix epoch ('-1790596532s'), and with one sample
+ *  min === max is a degenerate axis it will not widen (both are user bounds). */
+function xAxisBounds(
+  timeRange: TimeRange,
+  sessionStart: number | null,
+  now: number,
+  store: SampleStore,
+  from: number,
+): { min?: number; max?: number; stepSize?: number } {
+  if (Number.isFinite(TIME_RANGE_MS[timeRange])) return resolveTimeWindow(timeRange, sessionStart, now);
+  const visible = store.count > from;
+  const min = visible ? store.tsAt(from) : now;
+  return { min, max: Math.max(visible ? store.tsAt(store.count - 1) : now, min + ALL_MIN_SPAN_MS) };
+}
+
+/** Auto-scale fits [dataMin, dataMax] — which on a settled reading IS the meter's own
+ *  ±1-count dither, so one count of noise gets magnified to the full canvas height and a
+ *  steady measurement is displayed as violent movement. Floor the span at
+ *  ±STABLE_LSD_TOLERANCE counts around the window's midpoint: reusing the stability gate's
+ *  constant keeps ONE number in the codebase for "a change smaller than this is not a
+ *  measurement" (docs/gotchas.md explains why it is 20 and why 2 was too tight), so the
+ *  chart stops resolving below the noise floor the app has already declared.
+ *
+ *  suggestedMin/Max are soft — Chart.js takes min(dataMin, suggestedMin) — so real spread
+ *  still widens the axis and a transient is never clipped. A hard min/max here would be
+ *  wrong for a meter. Empty when a manual range is set, the resolution is unknown, or there
+ *  is no data. */
+function yAxisFloor(
+  yMin: number | undefined,
+  yMax: number | undefined,
+  binWidth: number | undefined,
+  lo: number,
+  hi: number,
+): { suggestedMin?: number; suggestedMax?: number } {
+  const floored =
+    yMin === undefined &&
+    yMax === undefined &&
+    typeof binWidth === 'number' &&
+    binWidth > 0 &&
+    Number.isFinite(binWidth) &&
+    lo <= hi;
+  if (!floored) return {};
+  const half = STABLE_LSD_TOLERANCE * binWidth;
+  const mid = (lo + hi) / 2;
+  return { suggestedMin: mid - half, suggestedMax: mid + half };
+}
+
 function drawHistogram(
   chart: Chart,
   counts: Map<number, number>,
@@ -592,30 +648,12 @@ export function RealtimeChart({
     // X range. A bounded range spans exactly its window, so pixels-per-second is a
     // constant: the axis is anchored at the session start while the window fills (the
     // trace grows rightward and nothing already drawn moves), then rolls with the clock.
-    // 'all' sets nothing and the axis fits the data instead — see resolveTimeWindow.
+    // 'all' fits the data instead — see xAxisBounds.
     const xScale = chart.options.scales?.x as
       | { min?: number; max?: number; ticks?: { stepSize?: number } }
       | undefined;
     if (xScale) {
-      const win = resolveTimeWindow(timeRange, sessionStart ?? null, now);
-      const { stepSize } = win;
-      let min = win.min;
-      let max = win.max;
-      if (!Number.isFinite(windowMs)) {
-        // 'all' has no fixed window, so the axis fits the data — but "the data" must mean
-        // the STORE's bounds, not the tier's last emitted point. A bucket emits its min and
-        // max, and which of those is newest hops around inside the newest bucket as samples
-        // arrive, so letting Chart.js auto-fit made the axis maximum jump every update: the
-        // whole plot area re-laid-out and the right-hand label flickered between `Now` and
-        // `-1s`. Real sample timestamps only ever move forward.
-        //
-        // Never left undefined or zero-width: with no visible sample Chart.js falls back to
-        // 0..1 and the ticks read as minus the Unix epoch ('-1790596532s'), and with one
-        // sample min === max is a degenerate axis it will not widen (both are user bounds).
-        const visible = store.count > from;
-        min = visible ? store.tsAt(from) : now;
-        max = Math.max(visible ? store.tsAt(store.count - 1) : now, min + ALL_MIN_SPAN_MS);
-      }
+      const { min, max, stepSize } = xAxisBounds(timeRange, sessionStart ?? null, now, store, from);
       // Assigned unconditionally, `undefined` included: Chart.js reuses this options
       // object across updates, so a bounded range's min/max left behind would pin 'all'
       // to a dead window — the same trap the y-axis floor below guards against.
@@ -638,37 +676,11 @@ export function RealtimeChart({
       // Histogram: it is the x-axis title, set in that branch above.
       yScale.min = yMin; // undefined => Chart.js auto-scales
       yScale.max = yMax;
-
-      // Auto-scale fits [dataMin, dataMax] — which on a settled reading IS the meter's
-      // own ±1-count dither, so one count of noise gets magnified to the full canvas
-      // height and a steady measurement is displayed as violent movement. Floor the
-      // span at ±STABLE_LSD_TOLERANCE counts around the window's midpoint: reusing the
-      // stability gate's constant keeps ONE number in the codebase for "a change
-      // smaller than this is not a measurement" (docs/gotchas.md explains why it is 20
-      // and why 2 was too tight), so the chart stops resolving below the noise floor
-      // the app has already declared.
-      //
-      // suggestedMin/Max are soft — Chart.js takes min(dataMin, suggestedMin) — so real
-      // spread still widens the axis and a transient is never clipped. A hard min/max
-      // here would be wrong for a meter.
-      const floored =
-        yMin === undefined &&
-        yMax === undefined &&
-        typeof binWidth === 'number' &&
-        binWidth > 0 &&
-        Number.isFinite(binWidth) &&
-        lo <= hi;
-      // Cleared when not applicable: Chart.js reuses this options object across
-      // updates, so a stale suggestion would outlive the condition that set it.
-      if (floored) {
-        const half = STABLE_LSD_TOLERANCE * binWidth;
-        const mid = (lo + hi) / 2;
-        yScale.suggestedMin = mid - half;
-        yScale.suggestedMax = mid + half;
-      } else {
-        yScale.suggestedMin = undefined;
-        yScale.suggestedMax = undefined;
-      }
+      // Assigned unconditionally, `undefined` included: Chart.js reuses this options
+      // object across updates, so a stale suggestion would outlive the condition that set it.
+      const { suggestedMin, suggestedMax } = yAxisFloor(yMin, yMax, binWidth, lo, hi);
+      yScale.suggestedMin = suggestedMin;
+      yScale.suggestedMax = suggestedMax;
     }
     chart.update('none');
     // `counts` is listed for the linter and for documentation only: its identity is stable

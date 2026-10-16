@@ -24,6 +24,13 @@ const NAV_ICONS: Record<NavId, React.ReactNode> = {
   settings: <Settings size={15} />,
 };
 
+const STATUS_VIEW: Record<SerialStatus, { label: string; className: string }> = {
+  connected: { label: 'Connected', className: 'text-success' },
+  connecting: { label: 'Connecting…', className: 'text-amber' },
+  disconnected: { label: 'Disconnected', className: 'text-muted' },
+  unsupported: { label: 'Disconnected', className: 'text-muted' },
+};
+
 export function Sidebar({
   status,
   baud,
@@ -73,9 +80,7 @@ export function Sidebar({
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs">
               <span className="text-muted">Status</span>
-              <span className={connected ? 'text-success' : connecting ? 'text-amber' : 'text-muted'}>
-                {connected ? 'Connected' : connecting ? 'Connecting…' : 'Disconnected'}
-              </span>
+              <span className={STATUS_VIEW[status].className}>{STATUS_VIEW[status].label}</span>
             </div>
             <div className="flex items-center justify-between text-xs">
               <span className="text-muted">Interface</span>

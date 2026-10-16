@@ -203,14 +203,17 @@ export function DataLog({
     // lib/search.ts so `scripts/check-search.mts` can assert it equals `localIso()`.
     const isoOf = createIsoFormatter();
 
+    const matches = (r: RowData): boolean =>
+      modeHit.get(r.mode) || unitMatches(r.unit) ||
+      (r.note !== '' && r.note.toLowerCase().includes(q)) ||
+      (testValue && rowValue(r.value, r.unit, r.decimals).includes(q)) ||
+      (testIso && isoOf(r.ts).includes(upper));
+
     let scanned = 0;
     for (let i = store.count - 1; i >= 0 && out.length < MAX_RENDERED; i--) {
       scanned++;
       const r = read(i);
-      if (modeHit.get(r.mode) || unitMatches(r.unit)) { out.push(r); continue; }
-      if (r.note !== '' && r.note.toLowerCase().includes(q)) { out.push(r); continue; }
-      if (testValue && rowValue(r.value, r.unit, r.decimals).includes(q)) { out.push(r); continue; }
-      if (testIso && isoOf(r.ts).includes(upper)) { out.push(r); continue; }
+      if (matches(r)) out.push(r);
     }
     // `truncated` here means "there may be older matches", which is true exactly when the
     // scan stopped early rather than reaching the start of the store.
