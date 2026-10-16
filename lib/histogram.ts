@@ -31,6 +31,14 @@ type Bin = { value: number; count: number; kind: 'under' | 'in' | 'over' };
 /** `width` is the effective bin width, which the label decimals derive from. */
 type Histogram = { bins: Bin[]; width: number };
 
+/** The most-counted value; the first one logged wins a tie, and an empty input gives 0. */
+function dominantValue(entries: readonly Entry[]): number {
+  let c = 0;
+  let best = -1;
+  for (const [v, n] of entries) if (n > best) { best = n; c = v; }
+  return c;
+}
+
 /**
  * LSD grid: bins are integer multiples of `width`, anchored at zero, so each bar is
  * centered on (and labeled with) an actual value the meter can display. The window
@@ -45,11 +53,7 @@ function buildLsdHistogram(entries: readonly Entry[], width: number, centerValue
   // `entries[0]` is whichever value happened to be logged FIRST this session — session-order
   // noise, not a centre. The most-counted value is the same thing `centerValue` normally
   // carries, so falling back to it degrades gracefully instead of arbitrarily.
-  let c = Number.isFinite(centerValue) ? (centerValue as number) : 0;
-  if (!Number.isFinite(centerValue) && entries.length > 0) {
-    let best = -1;
-    for (const [v, n] of entries) if (n > best) { best = n; c = v; }
-  }
+  const c = Number.isFinite(centerValue) ? (centerValue as number) : dominantValue(entries);
   const centerBin = Math.round(c / width);
   const minHalf = Math.floor((MIN_BINS - 1) / 2);
 
@@ -60,8 +64,8 @@ function buildLsdHistogram(entries: readonly Entry[], width: number, centerValue
   for (const [v] of entries) {
     const b = Math.round(v / width);
     if (b >= centerBin - MAX_HALF_BINS && b <= centerBin + MAX_HALF_BINS) {
-      if (b < lo) lo = b;
-      if (b > hi) hi = b;
+      lo = Math.min(lo, b);
+      hi = Math.max(hi, b);
     }
   }
 

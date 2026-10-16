@@ -39,6 +39,10 @@ function isSupported(): boolean {
 // probe that is still walking the remaining candidates.
 type LoopControl = { stop: boolean; live: boolean };
 
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 /**
  * Web Serial lifecycle hook. All access to navigator.serial is guarded so that
  * SSR / `next build` prerendering never touches a browser-only API.
@@ -68,6 +72,14 @@ export function useSerial(onReadings: (readings: Reading[]) => void) {
       const parser = createParser();
       const decoder = new TextDecoder();
       let sawData = false;
+      const deliver = (value: Uint8Array) => {
+        const readings = parser.push(decoder.decode(value, { stream: true }));
+        if (!readings.length) return;
+        // Readings parsed during a successful probe are real measurements, not
+        // test traffic — they go to the consumer like any other batch.
+        if (!sawData) { sawData = true; onFirstData?.(); }
+        onReadingsRef.current(readings);
+      };
 
       while (port.readable && !ctl.stop) {
         const reader = port.readable.getReader();
@@ -76,15 +88,7 @@ export function useSerial(onReadings: (readings: Reading[]) => void) {
           for (;;) {
             const { value, done } = await reader.read();
             if (done) break;
-            if (value) {
-              const readings = parser.push(decoder.decode(value, { stream: true }));
-              if (readings.length) {
-                // Readings parsed during a successful probe are real measurements, not
-                // test traffic — they go to the consumer like any other batch.
-                if (!sawData) { sawData = true; onFirstData?.(); }
-                onReadingsRef.current(readings);
-              }
-            }
+            if (value) deliver(value);
           }
         } catch (e) {
           // Suppress the AbortError thrown by reader.cancel() during a normal disconnect
@@ -94,7 +98,7 @@ export function useSerial(onReadings: (readings: Reading[]) => void) {
           // — auto-reconnect is specified to end silently. Only the promoted loop, and
           // connect()'s own loop, may raise a banner.
           if (!ctl.stop && ctl.live) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(errorText(e));
           }
         } finally {
           reader.releaseLock();
@@ -207,7 +211,7 @@ export function useSerial(onReadings: (readings: Reading[]) => void) {
         void readLoop(port, ctl); // fire-and-forget; loop ends on disconnect
       } catch (e) {
         keepReadingRef.current = false;
-        const msg = e instanceof Error ? e.message : String(e);
+        const msg = errorText(e);
         // User dismissed the port picker — not an error worth surfacing.
         if (!msg.includes('No port selected')) {
           setError(msg);
