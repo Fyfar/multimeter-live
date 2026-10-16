@@ -67,6 +67,11 @@ const OUTLIER_COLOR = 'rgba(245,158,11,0.7)';  // amber — under/over-range bin
  */
 const ALL_INITIAL_BUCKET_MS = 50;
 
+/** Shortest span the 'all' axis is drawn over, anchored at its first sample like a bounded
+ *  window that is still filling. Tick labels are whole seconds, so a span much under ~10 s
+ *  repeats them ('-1s, -1s, Now, Now'). */
+const ALL_MIN_SPAN_MS = 10_000;
+
 export type Theme = 'dark' | 'light';
 
 // Canvas colors cannot follow the CSS tokens, so the neutrals are mirrored here per theme
@@ -603,8 +608,13 @@ export function RealtimeChart({
         // arrive, so letting Chart.js auto-fit made the axis maximum jump every update: the
         // whole plot area re-laid-out and the right-hand label flickered between `Now` and
         // `-1s`. Real sample timestamps only ever move forward.
-        min = store.count > from ? store.tsAt(from) : undefined;
-        max = store.count > 0 ? store.tsAt(store.count - 1) : undefined;
+        //
+        // Never left undefined or zero-width: with no visible sample Chart.js falls back to
+        // 0..1 and the ticks read as minus the Unix epoch ('-1790596532s'), and with one
+        // sample min === max is a degenerate axis it will not widen (both are user bounds).
+        const visible = store.count > from;
+        min = visible ? store.tsAt(from) : now;
+        max = Math.max(visible ? store.tsAt(store.count - 1) : now, min + ALL_MIN_SPAN_MS);
       }
       // Assigned unconditionally, `undefined` included: Chart.js reuses this options
       // object across updates, so a bounded range's min/max left behind would pin 'all'
