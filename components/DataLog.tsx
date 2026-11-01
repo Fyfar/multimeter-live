@@ -8,7 +8,8 @@ import { MODES, UNITS, type SampleStore } from '@/lib/samples';
 import { couldMatchIso, couldMatchValue, createIsoFormatter, localIso } from '@/lib/search';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
 import type { SessionStats } from '@/lib/capture';
-import { ActionButton, RecordButton } from '@/components/Controls';
+import { ActionButton, PanelStrip, RecordButton } from '@/components/Controls';
+import { Drawer } from '@/components/Drawer';
 
 /**
  * Exactly what one rendered row needs, as SCALARS. Deliberately not the store's `Sample`
@@ -68,8 +69,11 @@ const ROW_COST_US_TEXT = 0.1;
 const ROW_COST_US_VALUE = 0.45;
 const ROW_COST_US_ISO = 1.0;
 
-// Shared grid for the table header and rows (matches the reference layout).
-const GRID_COLS = 'grid grid-cols-[minmax(0,2fr)_120px_minmax(0,1fr)_80px_minmax(0,3fr)]';
+// Shared grid for the table header and rows (matches the reference layout). Below lg the
+// tracks get floors (a full 29-char timestamp is ~13.5rem of text-xs mono) and the table
+// scrolls sideways inside its panel; lg: is the unchanged desktop template.
+const GRID_COLS =
+  'grid max-lg:min-w-[42rem] max-lg:grid-cols-[minmax(13.5rem,2fr)_120px_minmax(5rem,1fr)_80px_minmax(8rem,3fr)] lg:grid-cols-[minmax(0,2fr)_120px_minmax(0,1fr)_80px_minmax(0,3fr)]';
 
 // Cap how many rows are painted into the DOM. All readings stay in memory (and in
 // the CSV export); only rendering is windowed to the most recent N for performance.
@@ -88,6 +92,9 @@ export function DataLog({
   onToggleRecord,
   onClear,
   onNoteChange,
+  panelOpen,
+  onOpenPanel,
+  onClosePanel,
 }: {
   reading: Reading | null;
   recording: boolean;
@@ -106,6 +113,9 @@ export function DataLog({
   onToggleRecord: () => void;
   onClear: () => void;
   onNoteChange: (seq: number, note: string) => void;
+  panelOpen: boolean;
+  onOpenPanel: () => void;
+  onClosePanel: () => void;
 }) {
   const [query, setQuery] = useState('');
   // The query the SCAN uses, one debounce behind the input. `query` drives the text field so
@@ -264,7 +274,7 @@ export function DataLog({
       {/* ── Main content (same width as the Dashboard's main: flex-1 + p-5) ── */}
       <main className="flex min-w-0 flex-1 flex-col gap-4 overflow-hidden p-5">
         {/* Live reading bar */}
-        <section className="flex items-center justify-between rounded-lg border border-border bg-panel px-5 py-4">
+        <section className="flex items-center justify-between rounded-lg border border-border bg-panel px-5 py-4 max-lg:flex-wrap max-lg:gap-3">
           <div className="flex items-baseline gap-4">
             <span className="text-xs font-semibold uppercase tracking-wider text-muted">
               Live Reading
@@ -293,17 +303,21 @@ export function DataLog({
           </div>
         </section>
 
+        <PanelStrip label="More" expanded={panelOpen} onOpen={onOpenPanel}>
+          <RecordButton recording={recording} canRecord={canRecord} onToggle={onToggleRecord} />
+        </PanelStrip>
+
         {/* Recorded measurements table */}
         <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-panel">
           {/* Table toolbar */}
-          <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5">
+          <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3.5 max-lg:flex-wrap">
             <div className="flex items-center gap-3">
               <h2 className="text-sm font-semibold text-fg">Recorded Measurements</h2>
               <span className="rounded-full border border-border bg-surface px-2.5 py-0.5 text-xs text-muted">
                 {store.count.toLocaleString('en')} entries
               </span>
             </div>
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2.5 max-lg:flex-wrap">
               <div className="flex items-center gap-2 rounded-md border border-border bg-surface px-3 py-2">
                 <Search size={14} className="text-muted" />
                 <input
@@ -324,23 +338,23 @@ export function DataLog({
             </div>
           </div>
 
-          {/* Column header */}
-          <div className={clsx(GRID_COLS, 'border-b border-border bg-canvas/40 px-5')}>
-            <Th>Timestamp</Th>
-            <Th>Mode</Th>
-            <Th className="text-right">Value</Th>
-            <Th className="pl-5">Unit</Th>
-            <Th>Notes</Th>
-          </div>
-
-          {/* Rows */}
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          {/* Rows, with the column header inside the same scroller so a sideways scroll
+              keeps them aligned. Sticky needs an opaque header: panel colour under the same
+              canvas/40 tint it had when it sat outside the scroller. */}
+          <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+            <div className={clsx(GRID_COLS, 'sticky top-0 z-10 border-b border-border bg-panel bg-linear-to-b from-canvas/40 to-canvas/40 px-5')}>
+              <Th>Timestamp</Th>
+              <Th>Mode</Th>
+              <Th className="text-right">Value</Th>
+              <Th className="pl-5">Unit</Th>
+              <Th>Notes</Th>
+            </div>
             {store.count === 0 ? (
-              <div className="flex h-full items-center justify-center px-5 py-10 text-center text-sm text-muted">
+              <div className="flex flex-1 items-center justify-center px-5 py-10 text-center text-sm text-muted">
                 No measurements recorded yet. Start logging to capture readings.
               </div>
             ) : visible.length === 0 ? (
-              <div className="flex h-full items-center justify-center px-5 py-10 text-center text-sm text-muted">
+              <div className="flex flex-1 items-center justify-center px-5 py-10 text-center text-sm text-muted">
                 No rows match “{appliedQuery}”.
               </div>
             ) : (
@@ -374,7 +388,7 @@ export function DataLog({
 
       {/* ── Right panel: same shell as the Dashboard's Controls (w-56, border-l,
           bg-canvas, p-4 space-y-5). Only the content differs. ── */}
-      <aside className="flex w-56 shrink-0 flex-col overflow-y-auto border-l border-border bg-canvas">
+      <Drawer open={panelOpen} onClose={onClosePanel} label="Data Log options" className="flex shrink-0 flex-col overflow-y-auto border-l border-border bg-canvas lg:w-56">
         <div className="space-y-5 p-4">
           {/* Logging */}
           <div>
@@ -396,7 +410,7 @@ export function DataLog({
           {/* Session summary — reuses the Dashboard's StatisticsPanel (bare, stacked) */}
           <StatisticsPanel bare layout="stack" title="Session Summary" stats={stats} baseUnit={baseUnit} resolution={resolution} />
         </div>
-      </aside>
+      </Drawer>
     </>
   );
 }

@@ -1,8 +1,9 @@
 'use client';
 
-import { Download, Play, Square, Trash2 } from 'lucide-react';
+import { AlertTriangle, Download, Play, SlidersHorizontal, Square, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
 import { Toggle } from '@/components/Toggle';
+import { Drawer } from '@/components/Drawer';
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return <h3 className="mb-3 text-xs font-semibold text-fg">{children}</h3>;
@@ -14,17 +15,20 @@ export function ActionButton({
   label,
   variant = 'default',
   disabled,
+  expanded,
 }: {
   onClick?: () => void;
   icon: React.ReactNode;
-  label: string;
+  label: React.ReactNode;
   variant?: 'default' | 'active' | 'danger' | 'success';
   disabled?: boolean;
+  expanded?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
+      aria-expanded={expanded}
       className={clsx(
         'flex w-full items-center gap-2.5 rounded-md border px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
         variant === 'active' && 'border-amber/30 bg-amber/10 text-amber hover:bg-amber/20',
@@ -59,6 +63,28 @@ export function RecordButton({
   );
 }
 
+// Below lg: the view's always-visible actions (`children`) plus the button that opens its
+// drawer. `warning` marks the opener while a setup advisory inside the drawer is active.
+export function PanelStrip({ label, expanded, warning = false, onOpen, children }: {
+  label: string;
+  expanded: boolean;
+  warning?: boolean;
+  onOpen: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-2 lg:hidden">
+      {children}
+      <ActionButton
+        onClick={onOpen}
+        expanded={expanded}
+        icon={warning ? <AlertTriangle size={12} className="text-amber" /> : <SlidersHorizontal size={12} />}
+        label={warning ? <>{label}<span className="sr-only"> (setup warning active)</span></> : label}
+      />
+    </div>
+  );
+}
+
 export function Controls({
   rangeMin,
   rangeMax,
@@ -82,6 +108,8 @@ export function Controls({
   canClear,
   onExportCsv,
   canExport,
+  open,
+  onClose,
 }: {
   rangeMin: string;
   rangeMax: string;
@@ -110,9 +138,12 @@ export function Controls({
   canClear: boolean;
   onExportCsv: () => void;
   canExport: boolean;
+  /** Below lg the panel is a drawer; at lg it is the inline right column as always. */
+  open: boolean;
+  onClose: () => void;
 }) {
   return (
-    <aside className="flex w-56 shrink-0 flex-col overflow-y-auto border-l border-border bg-canvas">
+    <Drawer open={open} onClose={onClose} label="Controls" className="flex shrink-0 flex-col overflow-y-auto border-l border-border bg-canvas lg:w-56">
       <div className="space-y-5 p-4">
 
         {/* Chart Range */}
@@ -209,7 +240,7 @@ export function Controls({
         </div>
 
       </div>
-    </aside>
+    </Drawer>
   );
 }
 

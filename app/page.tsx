@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { clsx } from 'clsx';
+import { ChevronDown, Moon, Sun } from 'lucide-react';
 import { DigitalDisplay } from '@/components/DigitalDisplay';
 import { RealtimeChart, type Theme } from '@/components/RealtimeChart';
-import { Controls } from '@/components/Controls';
+import { Controls, PanelStrip, RecordButton } from '@/components/Controls';
 import { Sidebar, NAV_IDS, type NavId } from '@/components/Sidebar';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { DataLog } from '@/components/DataLog';
@@ -94,38 +95,55 @@ function unlessBusy(other: ConnectionStatus, clearOther: () => void, connect: ()
   void connect();
 }
 
-function AppHeader({ status, detail, theme, onToggleTheme }: {
+function AppHeader({ status, detail, theme, onToggleTheme, connectionOpen, onOpenConnection }: {
   status: ConnectionStatus; detail: string; theme: Theme; onToggleTheme: () => void;
+  connectionOpen: boolean; onOpenConnection: () => void;
 }) {
+  const connected = status === 'connected';
+  // Built once, placed twice: inline at lg (as before), and below lg inside the button
+  // that opens the Connection drawer, where a long device name truncates visually but
+  // stays whole in the accessible name.
+  const statusContent = (
+    <>
+      <span className={clsx('h-2 w-2 shrink-0 rounded-full', STATUS_DOT[status])} />
+      <span className={connected ? 'text-success' : 'text-muted'}>{STATUS_LABEL[status]}</span>
+      {connected && <span className="truncate text-muted">{detail}</span>}
+    </>
+  );
+  // Names the theme a click switches TO.
+  const themeWord = theme === 'dark' ? 'Light' : 'Dark';
+
   return (
-    <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-canvas px-5">
+    <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-canvas px-5 max-lg:gap-3 max-sm:px-3">
       {/* Logo */}
       <div className="flex items-center gap-2.5">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <polyline points="22,12 18,12 15,21 9,3 6,12 2,12" />
         </svg>
-        <span className="text-sm font-semibold text-fg">Multimeter Visualizer</span>
+        <span className="hidden text-sm font-semibold text-fg sm:inline">Multimeter Visualizer</span>
       </div>
 
       {/* Connection status */}
-      <div className="flex items-center gap-2 text-sm">
-        <span className={clsx('h-2 w-2 rounded-full', STATUS_DOT[status])} />
-        <span className={status === 'connected' ? 'text-success' : 'text-muted'}>
-          {STATUS_LABEL[status]}
-        </span>
-        {status === 'connected' && (
-          <span className="text-muted">{detail}</span>
-        )}
-      </div>
+      <div className="hidden items-center gap-2 text-sm lg:flex">{statusContent}</div>
+      <button
+        onClick={onOpenConnection}
+        aria-expanded={connectionOpen}
+        aria-label={`Connection: ${STATUS_LABEL[status]}${connected ? `, ${detail}` : ''}`}
+        className="flex min-w-0 flex-1 items-center justify-center gap-2 rounded-md px-2 py-1 text-sm transition-colors hover:bg-surface lg:hidden"
+      >
+        {statusContent}
+        <ChevronDown size={14} className="shrink-0 text-muted" />
+      </button>
 
       {/* Actions */}
       <div className="flex items-center gap-2">
-        {/* Names the theme a click switches TO. */}
         <button
           onClick={onToggleTheme}
-          className="flex h-8 items-center justify-center rounded-md border border-border px-3 text-xs text-muted transition-colors hover:bg-surface hover:text-fg"
+          aria-label={themeWord}
+          className="flex h-8 items-center justify-center rounded-md border border-border px-3 text-xs text-muted transition-colors hover:bg-surface hover:text-fg max-lg:px-2"
         >
-          {theme === 'dark' ? 'Light' : 'Dark'}
+          <span className="lg:hidden">{theme === 'dark' ? <Sun size={14} /> : <Moon size={14} />}</span>
+          <span className="hidden lg:inline">{themeWord}</span>
         </button>
       </div>
     </header>
@@ -160,6 +178,10 @@ export default function Home() {
   // The active view. Stays 'dashboard' for the first render so it matches the statically
   // exported HTML; the URL hash takes over in the mount effect below.
   const [view, setView] = useState<NavId>('dashboard');
+  // The open drawer below lg: a view's own panel (open while it equals `view`, so any view
+  // change closes it) or the header's Connection card. One value, so only one is open.
+  const [sheet, setSheet] = useState<NavId | 'connection' | null>(null);
+  const closeSheet = useCallback(() => setSheet(null), []);
   const [current, setCurrent] = useState<Reading | null>(null);
   // Whether `current` has been confirmed stable. The capture engine owns the run counter;
   // this is its render-visible mirror, committed once per batch. Pass/Fail needs
@@ -297,7 +319,10 @@ export default function Home() {
     // Back/Forward across pushState entries fires popstate; an edited address bar fires
     // hashchange. Both resolve through the same validated read, so handling them twice is
     // harmless and missing either is not.
-    const sync = () => setView(fromHash());
+    const sync = () => {
+      setView(fromHash());
+      setSheet(null);
+    };
     window.addEventListener('hashchange', sync);
     window.addEventListener('popstate', sync);
     return () => {
@@ -331,6 +356,7 @@ export default function Home() {
   // hashchange event fires — the listener above is left for Back/Forward and manual edits.
   const navigate = useCallback((id: NavId) => {
     setView(id);
+    setSheet(null);
     if (window.location.hash.slice(1) !== id) {
       window.history.pushState(null, '', `#${id}`);
     }
@@ -590,16 +616,18 @@ export default function Home() {
       : (liveNumeric ? (normalizeReading(liveNumeric).baseValue ?? undefined) : undefined);
 
   return (
-    <div className="flex h-full flex-col bg-canvas">
+    <div className="flex h-dvh flex-col bg-canvas">
       <AppHeader
         status={status}
         detail={detail}
         theme={theme}
         onToggleTheme={toggleTheme}
+        connectionOpen={sheet === 'connection'}
+        onOpenConnection={() => setSheet('connection')}
       />
 
       {/* ── Body ── */}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 flex-1 max-sm:flex-col-reverse">
         {/* Left sidebar */}
         <Sidebar
           uart={{ status: serial.status, error: serial.error, connect: handleConnect, disconnect: serial.disconnect }}
@@ -610,6 +638,8 @@ export default function Home() {
           activeTransport={active}
           active={view}
           onNavChange={navigate}
+          connectionOpen={sheet === 'connection'}
+          onConnectionClose={closeSheet}
         />
 
         {view === 'dashboard' ? (
@@ -622,6 +652,9 @@ export default function Home() {
                   recording={recording}
                   sampleCount={recordedCount}
                 />
+                <PanelStrip label="Controls" expanded={sheet === 'dashboard'} onOpen={() => setSheet('dashboard')}>
+                  <RecordButton recording={recording} canRecord={status === 'connected'} onToggle={handleToggleRecord} />
+                </PanelStrip>
                 <RealtimeChart
                   store={store}
                   sampleVersion={sampleVersion}
@@ -667,6 +700,8 @@ export default function Home() {
               canClear={sampleCount > 0}
               onExportCsv={exportCsv}
               canExport={canExport}
+              open={sheet === 'dashboard'}
+              onClose={closeSheet}
             />
           </>
         ) : view === 'data-log' ? (
@@ -683,6 +718,9 @@ export default function Home() {
             onToggleRecord={handleToggleRecord}
             onClear={requestClear}
             onNoteChange={handleNoteChange}
+            panelOpen={sheet === 'data-log'}
+            onOpenPanel={() => setSheet('data-log')}
+            onClosePanel={closeSheet}
           />
         ) : view === 'pass-fail' ? (
           <PassFail
@@ -700,6 +738,9 @@ export default function Home() {
             rows={passFailRows}
             onClear={clearPassFail}
             onExportCsv={exportVerdictCsv}
+            panelOpen={sheet === 'pass-fail'}
+            onOpenPanel={() => setSheet('pass-fail')}
+            onClosePanel={closeSheet}
           />
         ) : (
           <Settings settings={settings} onChange={updateSettings} />
@@ -707,7 +748,7 @@ export default function Home() {
       </div>
 
       {/* ── Footer ── */}
-      <footer className="flex h-8 shrink-0 items-center justify-center border-t border-border">
+      <footer className="hidden h-8 shrink-0 lg:flex items-center justify-center border-t border-border">
         <p className="text-xs text-muted">
           Multimeter Visualizer v{APP_VERSION} &nbsp;·&nbsp; Built for precision.
         </p>

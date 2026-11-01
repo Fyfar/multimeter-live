@@ -38,6 +38,23 @@ Limits: Chromium-based browsers only (Web Bluetooth), no automatic reconnect aft
 reload or a drop, one connection at a time (USB or Bluetooth), and a module already
 connected to another device (e.g. a phone) will not appear in the chooser.
 
+### Phones and tablets
+
+The layout adapts to the screen, so the app works on phones and tablets as well as on a
+desktop. On a phone the navigation moves to a bottom bar, on a tablet it becomes an icon
+rail, and on both the side panels open from a button, so the reading and the chart keep
+the full width.
+
+- **Android:** connect over **Bluetooth** in a browser with Web Bluetooth (Chrome, Edge
+  or another Chromium-based browser). USB is not expected to work on Android. Not yet
+  tested on a real Android device.
+- **iPhone and iPad:** the app opens and the layout works, but it **cannot connect to the
+  meter**. Apple requires every iOS browser, Chrome and Edge included, to use Safari's
+  WebKit engine, and WebKit supports neither Web Serial nor Web Bluetooth.
+
+A locked screen or a background tab will likely drop the Bluetooth link, so use a phone
+for quick checks rather than long logging sessions.
+
 ### Install and offline use
 
 Multimeter·Live is a Progressive Web App, so there is no `.exe`, no `.dmg`, and no app
@@ -83,8 +100,10 @@ browser will also ask before the page goes away. You never reinstall to update.
   starts and stops by itself as the signal crosses it.
 - **USB or Bluetooth.** Connect with a USB-UART adapter, or wirelessly through a BLE
   serial module wired to the meter. The rest of the app works the same either way.
+- **Works on desktop, tablet and phone.** An adaptive layout with a bottom bar on phones
+  and slide-in side panels; see Phones and tablets above.
 - **Light and dark themes.** Dark by default. The **Light** / **Dark** button in the
-  header switches the whole interface, chart included, instantly and without touching
+  header (a sun/moon icon on smaller screens) switches the whole interface, chart included, instantly and without touching
   the connection or a running recording. The choice is remembered in this browser.
 - **Installable and offline.** A PWA that reconnects to your last USB adapter on its own
   and needs no network once loaded.
@@ -131,8 +150,8 @@ data.
   and has to be enabled with the `DefaultSerialGuardSetting` policy.
 - An origin served over `https://` or `localhost`, because Web Serial requires a secure
   context. The live demo is served over HTTPS, so it works as-is.
-- For Bluetooth: a browser with Web Bluetooth (Chromium-based only), in the same secure
-  context.
+- For Bluetooth: a browser with Web Bluetooth (Chromium-based only, desktop or Android),
+  in the same secure context. No iOS browser qualifies.
 
 ## Run it locally
 

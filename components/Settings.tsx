@@ -33,7 +33,7 @@ function InfoTooltip({ text }: { text: string }) {
       <span
         id={id}
         role="tooltip"
-        className="pointer-events-none absolute left-1/2 top-6 z-10 w-64 -translate-x-1/2 rounded-md border border-border bg-surface p-2.5 text-xs leading-relaxed text-muted opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100"
+        className="pointer-events-none absolute left-1/2 top-full z-10 mt-2 w-64 -translate-x-1/2 rounded-md border border-border bg-surface p-2.5 text-xs leading-relaxed text-muted opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100"
       >
         {text}
       </span>

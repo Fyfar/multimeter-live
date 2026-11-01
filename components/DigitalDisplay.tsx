@@ -33,7 +33,7 @@ export function DigitalDisplay({
   const valueColor = nonNumeric ? 'text-muted' : recording ? 'text-amber' : 'text-accent';
 
   return (
-    <section className="rounded-lg border border-border bg-panel p-5">
+    <section className="@container rounded-lg border border-border bg-panel p-5">
       {/* Header */}
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-sm font-semibold text-fg">Current Measurement</h2>
@@ -52,16 +52,17 @@ export function DigitalDisplay({
         </div>
       </div>
 
-      {/* Value */}
+      {/* Value — below lg the size follows the panel width (cqw) so `-0.0000 mV` fits a
+          360 px phone; lg: pins today's size. */}
       <div className="flex items-end justify-center gap-4 py-5">
         <span
-          className={`font-mono text-8xl font-bold leading-none tabular-nums transition-colors ${valueColor}`}
+          className={`font-mono text-[length:clamp(2.5rem,16cqw,6rem)] font-bold lg:text-8xl leading-none tabular-nums transition-colors ${valueColor}`}
           style={!nonNumeric && hasReading ? { textShadow: '0 0 28px rgba(59,130,246,0.35)' } : undefined}
         >
           {display}
         </span>
         {unit && (
-          <span className="mb-2 font-mono text-3xl font-semibold text-muted">{unit}</span>
+          <span className="mb-2 font-mono text-[length:clamp(1.25rem,5cqw,1.875rem)] font-semibold lg:text-3xl text-muted">{unit}</span>
         )}
       </div>
 

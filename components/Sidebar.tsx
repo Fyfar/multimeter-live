@@ -5,6 +5,7 @@ import { clsx } from 'clsx';
 import { useState } from 'react';
 import type { ConnectionStatus, Transport } from '@/lib/connection';
 import { BAUD_RATES } from '@/lib/settings';
+import { Drawer } from '@/components/Drawer';
 
 
 export type NavId = 'dashboard' | 'data-log' | 'pass-fail' | 'settings';
@@ -156,6 +157,8 @@ export function Sidebar({
   activeTransport,
   active,
   onNavChange,
+  connectionOpen,
+  onConnectionClose,
 }: {
   uart: Conn;
   ble: Conn;
@@ -165,6 +168,8 @@ export function Sidebar({
   activeTransport: Transport | null;
   active: NavId;
   onNavChange: (id: NavId) => void;
+  connectionOpen: boolean;
+  onConnectionClose: () => void;
 }) {
   const [picked, setPicked] = useState<Transport>('uart');
   // Locked to the busy transport, so the shown body is never the blocked one: the only
@@ -173,28 +178,39 @@ export function Sidebar({
   const conn = shown === 'uart' ? uart : ble;
 
   return (
-    <aside className="flex w-52 shrink-0 flex-col border-r border-border bg-canvas">
+    // Compact: a bar along the bottom (the body row is flex-col-reverse there, so it stays
+    // in normal flow — no fixed positioning). Medium: an icon rail. lg: today's sidebar.
+    <aside className="flex shrink-0 border-border bg-canvas max-sm:h-14 max-sm:border-t sm:w-14 sm:flex-col sm:border-r lg:w-52">
       {/* Navigation */}
-      <nav className="flex-1 space-y-0.5 p-3 pt-4">
+      <nav className="flex flex-1 gap-0.5 max-sm:p-1 sm:flex-col sm:p-2 sm:pt-4 lg:p-3 lg:pt-4">
         {NAV_ITEMS.map((item) => (
           <button
             key={item.id}
             onClick={() => onNavChange(item.id)}
+            aria-current={item.id === active ? 'page' : undefined}
             className={clsx(
               'flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+              'max-sm:flex-1 max-sm:flex-col max-sm:justify-center max-sm:gap-0.5 max-sm:px-1 max-sm:py-1 max-sm:text-[10px] sm:max-lg:justify-center sm:max-lg:px-0',
               item.id === active ? 'bg-accent text-white' : 'text-muted hover:bg-surface hover:text-fg',
             )}
           >
             {NAV_ICONS[item.id]}
-            {item.label}
+            {/* sr-only in the rail: still the button's accessible name. */}
+            <span className="sm:max-lg:sr-only">{item.label}</span>
           </button>
         ))}
       </nav>
 
-      {/* Connection */}
-      <div className="border-t border-border p-3">
-        <div className="space-y-3 rounded-lg border border-border bg-panel p-3">
-          <h3 className="text-xs font-semibold text-fg">Connection</h3>
+      {/* Connection — below lg a drawer opened from the header status, which names it. */}
+      <Drawer
+        as="div"
+        open={connectionOpen}
+        onClose={onConnectionClose}
+        label="Connection"
+        className="lg:border-t lg:border-border lg:p-3"
+      >
+        <div className="space-y-3 rounded-lg border border-border bg-panel p-3 max-lg:m-3">
+          <h3 className="hidden text-xs font-semibold text-fg lg:block">Connection</h3>
           <div role="group" aria-label="Transport" className="flex gap-1">
             {(['uart', 'ble'] as const).map((t) => (
               <button
@@ -236,7 +252,7 @@ export function Sidebar({
             )}
           </ConnectionBody>
         </div>
-      </div>
+      </Drawer>
     </aside>
   );
 }
