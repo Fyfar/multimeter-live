@@ -1,9 +1,8 @@
 # Multimeter·Live
 
-Real-time dashboard for the **ZOYI ZT703s** multimeter, running entirely in the
-browser. Connect the meter over USB serial or Bluetooth LE and watch the readout, trend
-and distribution of your measurements live, log them for up to a week, and export them
-to CSV. There is no backend and nothing to install.
+**Your ZOYI ZT703s, live in the browser.** Watch readings as they happen, see trends and
+noise at a glance, log a week of data, and sort parts pass/fail by ear. No install, no
+account, no backend. Your data never leaves your machine.
 
 [![Build](https://img.shields.io/github/actions/workflow/status/Fyfar/multimeter-live/deploy.yml?branch=main&label=build)](https://github.com/Fyfar/multimeter-live/actions/workflows/deploy.yml)
 [![Version](https://img.shields.io/github/package-json/v/Fyfar/multimeter-live?label=version&color=3b82f6)](https://github.com/Fyfar/multimeter-live/blob/main/package.json)
@@ -12,146 +11,61 @@ to CSV. There is no backend and nothing to install.
 
 ![Multimeter·Live dashboard with the live digital readout, trend chart, and session statistics](./images/dashboard.png)
 
-## Live demo
-
-**<https://fyfar.github.io/multimeter-live/>**
-
-Open it in a supported browser (Chrome, Edge, Opera, or Firefox 151+), connect your
-meter, and click **Connect**. Everything runs locally in your browser and no data
-leaves your machine.
-
-After the first time, you mostly stop clicking Connect. The app remembers the USB adapter
-you used and picks it back up when you reload or reopen the tab, without the browser's
-port chooser. Pressing Disconnect forgets it again, so if you free the port for
-something else, a reload will not quietly take it back.
-
-### Bluetooth (optional)
-
-You can also read the meter wirelessly through a BLE serial module wired to its UART:
-choose **Bluetooth** on the Connection card, press **Connect**, and pick the module.
-Tested with a **JDY-23**; HM-10 and its clones use the same `FFE0`/`FFE1` profile and will
-probably work, but are untested, as is any other module. Set the module's UART to
-**115200 baud** (the meter's speed) beforehand, following the official documentation for
-your exact module.
-
-Limits: Chromium-based browsers only (Web Bluetooth), no automatic reconnect after a
-reload or a drop, one connection at a time (USB or Bluetooth), and a module already
-connected to another device (e.g. a phone) will not appear in the chooser.
-
-### Phones and tablets
-
-The layout adapts to the screen, so the app works on phones and tablets as well as on a
-desktop. On a phone the navigation moves to a bottom bar, on a tablet it becomes an icon
-rail, and on both the side panels open from a button, so the reading and the chart keep
-the full width.
-
-- **Android:** connect over **Bluetooth** in a browser with Web Bluetooth (Chrome, Edge
-  or another Chromium-based browser). USB is not expected to work on Android. Not yet
-  tested on a real Android device.
-- **iPhone and iPad:** the app opens and the layout works, but it **cannot connect to the
-  meter**. Apple requires every iOS browser, Chrome and Edge included, to use Safari's
-  WebKit engine, and WebKit supports neither Web Serial nor Web Bluetooth.
-
-A locked screen or a background tab will likely drop the Bluetooth link, so use a phone
-for quick checks rather than long logging sessions.
-
-### Install and offline use
-
-Multimeter·Live is a Progressive Web App, so there is no `.exe`, no `.dmg`, and no app
-store listing. The web app is the app. In a supporting browser you can install it from
-the address-bar install icon and launch it in its own window with its own icon, the way
-you would a native desktop program.
-
-After your first visit it works fully offline, which is useful on a bench or in the
-field with no Wi-Fi. The meter connects over USB or Bluetooth, so nothing in the app
-needs the network anyway. The same install runs on Windows, macOS, Linux, and ChromeOS,
-and the browser handles the packaging, so there are no separate binaries to maintain or
-trust.
-
-When a new version is published the app does not reload on its own, because that would
-interrupt a recording. It shows a small "A new version is available" notice with Reload
-and Later buttons, so you update when it suits you. If a session has rows in it, the
-browser will also ask before the page goes away. You never reinstall to update.
-
-> **Not an official ZOYI / ZOTEK product.** Multimeter·Live is an independent,
-> community-built project and is **not affiliated with, endorsed by, or supported
-> by ZOYI or ZOTEK**. "ZOYI", "ZOTEK", and "ZT703s" are referenced only to describe
-> the hardware this tool works with.
-
-> **Device support:** Built specifically for the **ZOYI ZT703s** and its serial
-> packet format, tested on firmware **1.6.27**. The **ZT703s+** and **ZT706** likely
-> use the same protocol and may work, but they are **untested**. Other multimeters are
-> not supported.
+### **[Open the app →](https://fyfar.github.io/multimeter-live/)**
 
 ## Features
 
-- **Live readout and trend chart.** A large digital display with mode, unit and
-  resolution, next to a rolling chart with 10 s, 1 m, 10 m, 1 h or whole-session windows.
-- **Histogram view** of how your readings are distributed, binned to the meter's own
-  resolution. Handy for seeing noise, drift, or how tightly a batch of parts clusters.
-- **Continuous logging for up to 7 days.** Leave a session running and it keeps every
-  sample for a full week, with running statistics (average, min, max, peak-to-peak,
-  standard deviation) over the whole run.
-- **Searchable data log** with a note field on every row, and **CSV export** of the
-  session.
-- **Pass/Fail component testing.** Set a reference and tolerance, touch parts one after
-  another, and get a beep and a verdict for each. See below.
-- **Smart capture.** Log only stable values, or arm a trigger threshold so recording
-  starts and stops by itself as the signal crosses it.
-- **USB or Bluetooth.** Connect with a USB-UART adapter, or wirelessly through a BLE
-  serial module wired to the meter. The rest of the app works the same either way.
-- **Works on desktop, tablet and phone.** An adaptive layout with a bottom bar on phones
-  and slide-in side panels; see Phones and tablets above.
-- **Light and dark themes.** Dark by default. The **Light** / **Dark** button in the
-  header (a sun/moon icon on smaller screens) switches the whole interface, chart included, instantly and without touching
-  the connection or a running recording. The choice is remembered in this browser.
-- **Installable and offline.** A PWA that reconnects to your last USB adapter on its own
-  and needs no network once loaded.
+- **Live readout and trend chart**, from a 10-second window to the whole session.
+- **Histogram** binned to the meter's own resolution: noise, drift and how tightly a batch
+  of parts clusters, at a glance.
+- **Log for up to 7 days** with running average, min, max, peak-to-peak and standard
+  deviation. Searchable log with notes, **CSV export**.
+- **Pass/Fail sorting.** Set a reference and tolerance, touch parts one after another, and
+  hear the verdict: pass and fail tones are distinct enough to sort a tray of resistors
+  without looking at the screen. Verdicts export to their own CSV.
+- **Smart capture.** Record only stable values, or let a trigger threshold start and stop
+  recording for you.
+- **USB or Bluetooth.** Use a USB-UART adapter, or go wireless with a BLE serial module
+  wired to the meter. Your USB adapter reconnects on its own when you come back.
+- **Desktop, tablet and phone.** The layout adapts to the screen.
+- **Installable and offline.** Install it like a native app; after the first visit it
+  needs no network. Updates never interrupt a recording.
+- **Light and dark themes.**
 
-A week of samples lives in the open tab's memory, so it survives as long as the tab does:
-the USB connection and your view come back after a reload, but the recorded data does not.
-That is deliberate, not an oversight. Export a CSV before you close it.
+## What you need
 
-## Pass/Fail component testing
+**Meter:** a **ZOYI ZT703s** (tested on firmware 1.6.27). The ZT703s+ and ZT706 likely
+speak the same protocol but are untested. For Bluetooth, a BLE serial module set to
+**115200 baud**: tested with a **JDY-23**; HM-10 and its clones will probably work.
 
-Type in a reference value and a tolerance, then touch parts one after another. Each
-part that settles gets a PASS or FAIL against the band, lands in a table, and can
-optionally beep. The pass and fail tones are far apart in pitch and length so you can
-tell them apart without looking at the screen, which is the point when you are sorting
-a tray of resistors. Verdicts export to their own CSV, separate from the data log but in the same units the
-meter showed (`3.000,MOM`), so the two files line up.
+**Browser:**
 
-Some honest limits. It covers resistance, diode, and capacitance only: voltage and
-current have no overload reading on lifted probes, so there is no reliable way to tell
-where one part ends and the next begins. A part that reads as a dead short is reported
-as "no part connected" rather than as a failure, so Pass/Fail finds out-of-tolerance
-parts rather than shorts. Meter accuracy is not modelled, though the app warns you if
-your tolerance band is narrower than the meter can resolve.
+| | USB | Bluetooth |
+|---|:---:|:---:|
+| Chrome, Edge, Opera (desktop) | ✓ | ✓ |
+| Firefox 151+ (desktop) | ✓ | – |
+| Chrome and other Chromium browsers on Android | – | ✓ (untested) |
+| Safari, and any browser on iPhone or iPad | – | – |
 
-## Limitations
+On iPhone and iPad the app opens but cannot connect: Apple makes every iOS browser use
+Safari's engine, which supports neither Web Serial nor Web Bluetooth. The page must be
+served over `https://` or `localhost`; the hosted app already is.
 
-The meter can measure both DC and AC voltage and current, and shows frequency for AC
-signals on its own display. It does **not** send any of that over UART. The serial
-stream carries only the value and its unit (V, mV, A, mA), the same for DC and AC, so
-the app cannot tell the two apart. Voltage and current are therefore shown simply as
-"Voltage" and "Current", and there is no frequency data anywhere in the app. Read
-frequency, and check whether you are measuring DC or AC, on the meter itself.
+## Good to know
 
-Tested on a ZT703s with firmware 1.6.27. Other firmware versions may send different
-data.
+- **Recorded data lives in the open tab.** A reload brings back the connection, not the
+  data, so export a CSV before you close it.
+- **AC vs DC and frequency are not sent by the meter** over its serial output, so readings
+  show as plain "Voltage" and "Current". Check AC/DC on the meter itself.
+- **Pass/Fail covers resistance, diode and capacitance.** A dead short reads as "no part",
+  so it catches out-of-tolerance parts, not shorts.
+- **On a phone, a locked screen or background tab will likely drop Bluetooth.** Great for
+  quick checks, not for week-long logging.
 
-## Requirements
-
-- A **ZOYI ZT703s** multimeter connected over USB serial, or through a BLE serial
-  module set to 115200 baud (see Bluetooth above, and the device note).
-- A browser with the Web Serial API: any Chromium-based browser (Chrome, Edge, Opera)
-  or **Firefox 151+** on desktop ([added May 2026](https://hacks.mozilla.org/2026/05/web-serial-support-in-firefox/)).
-  Safari is not supported. On Firefox Enterprise builds, Web Serial is off by default
-  and has to be enabled with the `DefaultSerialGuardSetting` policy.
-- An origin served over `https://` or `localhost`, because Web Serial requires a secure
-  context. The live demo is served over HTTPS, so it works as-is.
-- For Bluetooth: a browser with Web Bluetooth (Chromium-based only, desktop or Android),
-  in the same secure context. No iOS browser qualifies.
+> **Not an official ZOYI / ZOTEK product.** Multimeter·Live is an independent,
+> community-built project and is **not affiliated with, endorsed by, or supported by ZOYI
+> or ZOTEK**. "ZOYI", "ZOTEK", and "ZT703s" are referenced only to describe the hardware
+> this tool works with.
 
 ## Run it locally
 
@@ -160,14 +74,13 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), click **Connect**, and pick your
-serial port (or, with the switch on Bluetooth, your module) from the browser prompt.
+Then open [http://localhost:3000](http://localhost:3000).
 
 ## Contributing
 
-Issues and pull requests are welcome. If you have a ZT703s+ or ZT706 and can confirm
-whether it works, or you would like to add a feature or fix a bug, please open an
-[issue](https://github.com/Fyfar/multimeter-live/issues) or send a PR.
+Issues and pull requests are welcome, especially if you can confirm whether a ZT703s+,
+ZT706 or an Android phone works. Open an [issue](https://github.com/Fyfar/multimeter-live/issues)
+or send a PR.
 
 ## License
 
