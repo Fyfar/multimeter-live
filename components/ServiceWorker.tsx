@@ -95,7 +95,7 @@ export function ServiceWorker() {
   };
 
   return (
-    <div className="fixed bottom-4 left-1/2 z-50 -translate-x-1/2">
+    <div className="fixed bottom-20 left-1/2 z-50 -translate-x-1/2 sm:bottom-4">
       <div className="flex items-center gap-3 rounded-lg border border-border bg-panel px-4 py-3 shadow-lg">
         <span className="text-xs text-fg">A new version is available.</span>
         <button

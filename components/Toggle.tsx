@@ -13,23 +13,30 @@ export function Toggle({
   onChange: (v: boolean) => void;
   disabled?: boolean;
 }) {
+  // The button is a transparent hit area around the track: the coarse-pointer rule in
+  // globals.css gives buttons a 44px min-height, which would stretch a button that WAS the
+  // track. At a fine pointer the button is exactly the track's size, as before.
   return (
     <button
       role="switch"
       aria-checked={checked}
       disabled={disabled}
       onClick={() => onChange(!checked)}
-      className={clsx(
-        'relative h-5 w-9 flex-shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40',
-        checked ? 'bg-accent' : 'border border-border bg-surface',
-      )}
+      className="inline-flex flex-shrink-0 items-center rounded-full disabled:cursor-not-allowed disabled:opacity-40"
     >
       <span
         className={clsx(
-          'absolute left-0 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
-          checked ? 'translate-x-[18px]' : 'translate-x-0.5',
+          'relative h-5 w-9 rounded-full transition-colors',
+          checked ? 'bg-accent' : 'border border-border bg-surface',
         )}
-      />
+      >
+        <span
+          className={clsx(
+            'absolute left-0 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform duration-200',
+            checked ? 'translate-x-[18px]' : 'translate-x-0.5',
+          )}
+        />
+      </span>
     </button>
   );
 }

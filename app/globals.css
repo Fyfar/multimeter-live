@@ -34,6 +34,19 @@
   --color-muted: #59636e;
 }
 
+/* Touch: 44px hit areas. In @layer base so a scoped utility (min-h-0) can still exempt a
+   control; an unlayered rule would beat every Tailwind utility. min-height also overrides a
+   fixed height, which is why Toggle keeps its visual track in an inner span. */
+@layer base {
+  @media (pointer: coarse) {
+    button,
+    input,
+    select {
+      min-height: 44px;
+    }
+  }
+}
+
 body {
   background: var(--color-canvas);
   color: var(--color-fg);

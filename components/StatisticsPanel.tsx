@@ -45,25 +45,37 @@ export function StatisticsPanel({
     return { value: text, sub: unit };
   };
 
-  const entries: { label: string; value: string; sub?: string; color: string }[] = [
-    { label: 'Average', ...row(avg, 2), color: 'text-fg' },
-    { label: 'Minimum', ...row(min, 0), color: 'text-success' },
-    { label: 'Maximum', ...row(max, 0), color: 'text-danger' },
-    { label: 'Peak to Peak', ...row(peakToPeak, 0), color: 'text-fg' },
-    { label: 'Samples', value: isEmpty ? '—' : stats.count.toLocaleString('en'), color: 'text-fg' },
-    { label: 'Std Deviation', ...row(stdDev, 2), color: 'text-fg' },
+  const entries: { label: string; short: string; value: string; sub?: string; color: string }[] = [
+    { label: 'Average', short: 'Avg', ...row(avg, 2), color: 'text-fg' },
+    { label: 'Minimum', short: 'Min', ...row(min, 0), color: 'text-success' },
+    { label: 'Maximum', short: 'Max', ...row(max, 0), color: 'text-danger' },
+    { label: 'Peak to Peak', short: 'P-P', ...row(peakToPeak, 0), color: 'text-fg' },
+    { label: 'Samples', short: 'Samples', value: isEmpty ? '—' : stats.count.toLocaleString('en'), color: 'text-fg' },
+    { label: 'Std Deviation', short: 'Std dev', ...row(stdDev, 2), color: 'text-fg' },
   ];
 
   const isStack = layout === 'stack';
 
   const body = (
-    <div className={clsx(isStack ? 'flex flex-col gap-2.5' : 'grid grid-cols-3 gap-3 sm:grid-cols-6')}>
+    // Grid columns follow the panel's own width (@container on the wrapper) below lg; the
+    // lg: values pin the expanded layout to what it was before the adaptive layout.
+    <div className={clsx(isStack ? 'flex flex-col gap-2.5' : 'grid grid-cols-3 gap-3 @2xl:grid-cols-6 lg:grid-cols-6')}>
       {entries.map((s) => (
         <div
           key={s.label}
           className={clsx('rounded border border-border py-3', isStack ? 'px-4' : 'px-3 text-center')}
         >
-          <p className="text-xs text-muted">{s.label}</p>
+          {isStack ? (
+            <p className="text-xs text-muted">{s.label}</p>
+          ) : (
+            // Short label is visual only; the full one is read by screen readers, and shown
+            // once the panel is wide enough. `title` sits on the short span so the
+            // expanded layout gains no tooltip.
+            <p className="text-xs text-muted max-lg:whitespace-nowrap">
+              <span aria-hidden title={s.label} className="@2xl:hidden lg:hidden">{s.short}</span>
+              <span className="sr-only @2xl:not-sr-only lg:not-sr-only">{s.label}</span>
+            </p>
+          )}
           <p className={clsx('mt-1.5 font-mono text-lg font-semibold tabular-nums', s.color)}>
             {s.value}
             {s.sub && s.value !== '—' && (
@@ -78,7 +90,7 @@ export function StatisticsPanel({
   // Bare: flat section (matches the Controls sidebar's section style) — no card chrome.
   if (bare) {
     return (
-      <div>
+      <div className="@container">
         <h3 className="mb-3 text-xs font-semibold text-fg">{title}</h3>
         {body}
       </div>
@@ -86,7 +98,7 @@ export function StatisticsPanel({
   }
 
   return (
-    <section className="rounded-lg border border-border bg-panel p-5">
+    <section className="@container rounded-lg border border-border bg-panel p-5">
       <h2 className="mb-4 text-sm font-semibold text-fg">{title}</h2>
       {body}
     </section>

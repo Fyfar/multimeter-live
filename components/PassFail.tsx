@@ -3,7 +3,8 @@
 import { memo, useMemo } from 'react';
 import { AlertTriangle, Download, Trash2 } from 'lucide-react';
 import { clsx } from 'clsx';
-import { ActionButton } from '@/components/Controls';
+import { ActionButton, PanelStrip } from '@/components/Controls';
+import { Drawer } from '@/components/Drawer';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { normalizeReading, readingResolution, type Reading } from '@/lib/parser';
 import {
@@ -16,8 +17,10 @@ import { formatSiValue, siPrefixOf } from '@/lib/si';
 // Same windowing rationale as DataLog: keep every row in memory and in the CSV, but
 // cap what is painted into the DOM.
 const MAX_RENDERED = 500;
+// Below lg the tracks get floors and the table scrolls sideways inside its panel (see
+// DataLog's GRID_COLS); lg: is the unchanged desktop template.
 const GRID_COLS =
-  'grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_90px]';
+  'grid max-lg:min-w-[32rem] max-lg:grid-cols-[minmax(6rem,1.6fr)_minmax(6rem,1fr)_minmax(6rem,1fr)_minmax(6rem,1fr)_90px] lg:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_90px]';
 
 // Measured values at the reading's own resolution, the rule Measured Spread and the chart use.
 // Never a fixed digit count: meters on this protocol range from 25,000 to 60,000 counts, and a
@@ -129,6 +132,33 @@ function Tile({ value, label, className }: { value: React.ReactNode; label: stri
   );
 }
 
+function SetupSummary({ tested, summary, refEntry, tolEntry, toleranceMode, entryUnit }: {
+  tested: number;
+  summary: ReturnType<typeof summarizeBatch>;
+  refEntry: number | null;
+  tolEntry: number | null;
+  toleranceMode: ToleranceMode;
+  entryUnit: string;
+}) {
+  const tolerance =
+    tolEntry === null ? '' : toleranceMode === 'percent' ? ` ±${tolEntry}%` : ` ± ${formatEntryValue(tolEntry, entryUnit)}`;
+  return (
+    <div className="min-w-0 self-center text-xs text-muted">
+      <p className="truncate">
+        <span className="font-mono text-fg">{tested}</span> tested ·{' '}
+        <span className="font-mono text-success">{summary?.passed ?? 0}</span> pass ·{' '}
+        <span className="font-mono text-danger">{summary?.failed ?? 0}</span> fail
+        {summary && <> · <span className="font-mono text-fg">{summary.yieldPct.toFixed(1)}%</span></>}
+      </p>
+      <p className="truncate">
+        {refEntry === null ? 'No reference set' : (
+          <>Ref <span className="font-mono text-fg">{formatEntryValue(refEntry, entryUnit)}{tolerance}</span></>
+        )}
+      </p>
+    </div>
+  );
+}
+
 export function PassFail({
   reading,
   stable,
@@ -144,6 +174,9 @@ export function PassFail({
   rows,
   onClear,
   onExportCsv,
+  panelOpen,
+  onOpenPanel,
+  onClosePanel,
 }: {
   reading: Reading | null;
   stable: boolean;
@@ -161,6 +194,9 @@ export function PassFail({
   rows: VerdictRow[];
   onClear: () => void;
   onExportCsv: () => void;
+  panelOpen: boolean;
+  onOpenPanel: () => void;
+  onClosePanel: () => void;
 }) {
   const entryUnit = mode ? ENTRY_UNITS[mode].label : '';
 
@@ -235,6 +271,9 @@ export function PassFail({
           ? 'Settling\u2026'
           : `${fmtDeviation(baseUnit, deviation, lsd)} from reference`;
 
+  // Below lg the Reference section lives in the drawer; its opener carries the warning.
+  const setupWarning = refInvalid || tolInvalid || tolTooWide || implausible || belowResolution;
+
   // Unsupported mode: no controls, no capture, just an explanation.
   if (mode === null) return <UnsupportedMode />;
 
@@ -277,6 +316,18 @@ export function PassFail({
           </div>
         </section>
 
+        {/* Below lg: tally + reference in force, and the Setup drawer's opener. */}
+        <PanelStrip label="Setup" expanded={panelOpen} warning={setupWarning} onOpen={onOpenPanel}>
+          <SetupSummary
+            tested={rows.length}
+            summary={summary}
+            refEntry={refEntry}
+            tolEntry={tolEntry}
+            toleranceMode={toleranceMode}
+            entryUnit={entryUnit}
+          />
+        </PanelStrip>
+
         {/* Table */}
         <section className="flex min-h-0 flex-1 flex-col rounded-lg border border-border bg-panel">
           <div className="flex items-center justify-between border-b border-border px-5 py-3">
@@ -293,17 +344,18 @@ export function PassFail({
             </button>
           </div>
 
-          <div className={clsx(GRID_COLS, 'border-b border-border bg-canvas/40 px-5')}>
-            <Th>Timestamp</Th>
-            <Th className="text-right">Measured</Th>
-            <Th className="text-right">Reference</Th>
-            <Th className="text-right">Deviation</Th>
-            <Th className="text-right">Verdict</Th>
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto">
+          {/* Header inside the scroller so a sideways scroll keeps it aligned; opaque for
+              sticky (panel under the canvas/40 tint it always had). */}
+          <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+            <div className={clsx(GRID_COLS, 'sticky top-0 z-10 border-b border-border bg-panel bg-linear-to-b from-canvas/40 to-canvas/40 px-5')}>
+              <Th>Timestamp</Th>
+              <Th className="text-right">Measured</Th>
+              <Th className="text-right">Reference</Th>
+              <Th className="text-right">Deviation</Th>
+              <Th className="text-right">Verdict</Th>
+            </div>
             {rows.length === 0 ? (
-              <div className="flex h-full items-center justify-center px-5 py-10 text-center text-sm text-muted">
+              <div className="flex flex-1 items-center justify-center px-5 py-10 text-center text-sm text-muted">
                 No parts tested yet. Set a reference, then probe a part.
               </div>
             ) : (
@@ -324,7 +376,12 @@ export function PassFail({
       </div>
 
       {/* ── Right: controls + summary ── */}
-      <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto">
+      <Drawer
+        open={panelOpen}
+        onClose={onClosePanel}
+        label="Pass/Fail setup"
+        className="flex shrink-0 flex-col gap-4 overflow-y-auto lg:w-72 max-lg:pb-4 max-lg:[&>section]:mx-4"
+      >
         <section className="space-y-3 rounded-lg border border-border bg-panel p-4">
           <h3 className="text-xs font-semibold text-fg">Reference</h3>
 
@@ -456,7 +513,7 @@ export function PassFail({
             />
           </section>
         )}
-      </aside>
+      </Drawer>
     </main>
   );
 }

@@ -691,11 +691,15 @@ export function RealtimeChart({
       chartType, binWidth, centerValue, sessionStart, lineUnavailable, theme]);
   /* eslint-enable react-hooks/immutability */
 
+  const showTimeRange = chartType === 'line' && !lineUnavailable;
+
   return (
-    <section className="rounded-lg border border-border bg-panel p-5">
+    // @container: below lg the toolbar adapts to the chart panel's width, not the viewport;
+    // every lg: class pins the expanded layout to what it was.
+    <section className="@container rounded-lg border border-border bg-panel p-5">
       {/* Header */}
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-fg">
+      <div className="mb-4 flex items-center justify-between max-lg:flex-wrap max-lg:gap-2">
+        <h2 className="hidden text-sm font-semibold text-fg @md:block lg:block">
           {chartType === 'histogram' ? 'Value Distribution' : 'Measurement Over Time'}
         </h2>
         <div className="flex items-center gap-2">
@@ -724,8 +728,18 @@ export function RealtimeChart({
           </div>
 
           {/* Time-range selector (line view only, and only when it is actually drawn) */}
-          {chartType === 'line' && !lineUnavailable && (
-            <div className="flex overflow-hidden rounded-md border border-border">
+          {showTimeRange && (
+            <select
+              aria-label="Time range"
+              value={timeRange}
+              onChange={(e) => onTimeRangeChange(e.target.value as TimeRange)}
+              className="rounded-md border border-border bg-surface px-2 py-1 text-xs font-medium text-fg @lg:hidden lg:hidden"
+            >
+              {TIME_RANGE_LABELS.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+          )}
+          {showTimeRange && (
+            <div className="hidden overflow-hidden rounded-md border border-border @lg:flex lg:flex">
               {TIME_RANGE_LABELS.map((r) => (
                 <button
                   key={r}
