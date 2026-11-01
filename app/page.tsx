@@ -21,7 +21,9 @@ import {
   VERDICT_CSV_HEADER, isSupportedMode, parseEntry, verdictCsvLine,
   type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
-import { useSerial, type SerialStatus } from '@/lib/useSerial';
+import { useSerial } from '@/lib/useSerial';
+import { useBle } from '@/lib/useBle';
+import { isBusy, type ConnectionStatus, type Transport } from '@/lib/connection';
 import {
   DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings as SettingValues,
 } from '@/lib/settings';
@@ -58,22 +60,42 @@ const toFinite = (s: string): number | null => {
   return Number.isFinite(n) ? n : null;
 };
 
-const STATUS_LABEL: Record<SerialStatus, string> = {
+const STATUS_LABEL: Record<ConnectionStatus, string> = {
   connected: 'Connected',
   connecting: 'Connecting…',
   disconnected: 'Disconnected',
   unsupported: 'Unsupported',
 };
 
-const STATUS_DOT: Record<SerialStatus, string> = {
+const STATUS_DOT: Record<ConnectionStatus, string> = {
   connected: 'bg-success',
   connecting: 'animate-pulse bg-amber',
   disconnected: 'bg-muted',
   unsupported: 'bg-muted',
 };
 
-function AppHeader({ status, baud, theme, onToggleTheme }: {
-  status: SerialStatus; baud: number; theme: Theme; onToggleTheme: () => void;
+// At most one transport holds the slot. The combined status is the active one's; with
+// none active it is `unsupported` only when neither transport is supported.
+function resolveConnection(
+  uart: ConnectionStatus, ble: ConnectionStatus, baud: number, deviceName: string | null,
+) {
+  const active: Transport | null = isBusy(ble) ? 'ble' : isBusy(uart) ? 'uart' : null;
+  if (active === 'ble') return { active, status: ble, detail: `BLE · ${deviceName}` };
+  const status: ConnectionStatus = uart === 'unsupported' && ble !== 'unsupported' ? 'disconnected' : uart;
+  return { active, status, detail: `UART · ${baud} bps` };
+}
+
+// Guards each Connect against the other transport, closing a click that lands before the
+// other's busy state has rendered (the disabled button alone would not). Starting one also
+// clears the other's last error, which is stale once the operator has moved on.
+function unlessBusy(other: ConnectionStatus, clearOther: () => void, connect: () => unknown) {
+  if (isBusy(other)) return;
+  clearOther();
+  void connect();
+}
+
+function AppHeader({ status, detail, theme, onToggleTheme }: {
+  status: ConnectionStatus; detail: string; theme: Theme; onToggleTheme: () => void;
 }) {
   return (
     <header className="flex h-14 shrink-0 items-center justify-between border-b border-border bg-canvas px-5">
@@ -92,9 +114,7 @@ function AppHeader({ status, baud, theme, onToggleTheme }: {
           {STATUS_LABEL[status]}
         </span>
         {status === 'connected' && (
-          <span className="text-muted">
-            UART &nbsp;·&nbsp; {baud} bps
-          </span>
+          <span className="text-muted">{detail}</span>
         )}
       </div>
 
@@ -403,7 +423,9 @@ export default function Home() {
     [engine, commitReset],
   );
 
-  const { status, error, connect, disconnect } = useSerial(handleReadings);
+  const serial = useSerial(handleReadings);
+  const ble = useBle(handleReadings);
+  const { active, status, detail } = resolveConnection(serial.status, ble.status, baud, ble.deviceName);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional: reset recording on disconnect
@@ -459,7 +481,16 @@ export default function Home() {
     setPassFailRows(engine.passFailRows);
   }, [engine]);
 
-  const handleConnect = useCallback(() => connect(baud), [connect, baud]);
+  const { connect: serialConnect, clearError: clearSerialError } = serial;
+  const { connect: bleConnect, clearError: clearBleError } = ble;
+  const handleConnect = useCallback(
+    () => unlessBusy(ble.status, clearBleError, () => serialConnect(baud)),
+    [ble.status, clearBleError, serialConnect, baud],
+  );
+  const handleBleConnect = useCallback(
+    () => unlessBusy(serial.status, clearSerialError, bleConnect),
+    [serial.status, clearSerialError, bleConnect],
+  );
   const handleToggleRecord = useCallback(() => {
     // Manual toggle → this session is not trigger-owned, so never auto-stop it.
     setRec(!engine.recording, true);
@@ -560,18 +591,23 @@ export default function Home() {
 
   return (
     <div className="flex h-full flex-col bg-canvas">
-      <AppHeader status={status} baud={baud} theme={theme} onToggleTheme={toggleTheme} />
+      <AppHeader
+        status={status}
+        detail={detail}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
 
       {/* ── Body ── */}
       <div className="flex min-h-0 flex-1">
         {/* Left sidebar */}
         <Sidebar
-          status={status}
+          uart={{ status: serial.status, error: serial.error, connect: handleConnect, disconnect: serial.disconnect }}
+          ble={{ status: ble.status, error: ble.error, connect: handleBleConnect, disconnect: ble.disconnect }}
           baud={baud}
           onBaudChange={(v) => updateSettings({ baud: v })}
-          onConnect={handleConnect}
-          onDisconnect={disconnect}
-          error={error}
+          deviceName={ble.deviceName}
+          activeTransport={active}
           active={view}
           onNavChange={navigate}
         />
@@ -678,7 +714,7 @@ export default function Home() {
       </footer>
 
       {/* Connected-but-no-data warning — overlays every view; informational only. */}
-      {overlayVisible && <NoDataWarning onDismiss={() => setNoDataDismissed(true)} />}
+      {overlayVisible && <NoDataWarning transport={active} onDismiss={() => setNoDataDismissed(true)} />}
       {confirmClear && (
         <ConfirmDialog
           title="Clear all recorded data?"

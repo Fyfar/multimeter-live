@@ -198,13 +198,12 @@ export function withinStableBand(value: number, anchor: number, lsd: number | nu
   return Math.abs(value - anchor) <= lsd * STABLE_LSD_TOLERANCE * (1 + 1e-9);
 }
 
-export interface StreamParser {
+interface StreamParser {
   push(chunk: string): Reading[];
-  reset(): void;
 }
 
 /** Stateful, buffer-safe parser. Feed it raw chunks; get back complete Readings. */
-export function createParser(): StreamParser {
+function createParser(): StreamParser {
   let buffer = '';
 
   return {
@@ -239,9 +238,23 @@ export function createParser(): StreamParser {
 
       return out;
     },
+  };
+}
 
-    reset() {
-      buffer = '';
+interface ByteFeed {
+  push(bytes: Uint8Array): void;
+}
+
+// Bytes in, readings out, for every transport. Serial reads and BLE notifications cut the
+// stream at arbitrary byte offsets; the streaming decoder holds a split multi-byte
+// character (µ) and the parser holds a split measurement, so only the bytes matter.
+export function createByteFeed(emit: (readings: Reading[]) => void): ByteFeed {
+  const parser = createParser();
+  const decoder = new TextDecoder();
+  return {
+    push(bytes) {
+      const readings = parser.push(decoder.decode(bytes, { stream: true }));
+      if (readings.length) emit(readings);
     },
   };
 }

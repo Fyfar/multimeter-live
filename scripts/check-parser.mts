@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import {
   parseMeasurement, normalizeReading, readingResolution, withinStableBand,
-  displayUnit, STABLE_LSD_TOLERANCE, type Mode,
+  displayUnit, createByteFeed, STABLE_LSD_TOLERANCE, type Mode, type Reading,
 } from '../lib/parser.ts';
 
 let checks = 0;
@@ -158,5 +158,42 @@ assert.equal(parseMeasurement('RESISTANCE', 'Resistance:', '009.79 OM').unit, 'O
 assert.equal(normalizeReading(parseMeasurement('RESISTANCE', 'Resistance:', '009.79 KOM')).baseUnit,
   'OM', 'normalizeReading still keys off the wire spelling');
 checks += 10;
+
+// --- chunk independence ---------------------------------------------------------
+// BLE delivers 20-byte notifications and serial reads cut anywhere, so readings must
+// depend only on the bytes. `µ` is two UTF-8 bytes: a cut between them must not mangle it.
+// The junk prefix is a port opened mid-stream: longer than any token, ending right where
+// a token starts, so a cut inside it lands on the no-token tail trim.
+{
+  const bytes = new TextEncoder().encode(
+    'ltage:00.145 mVxxxxxxxxxxxxxx'
+    + 'Voltage:-0.0004 VVoltage:00.145 mVElectricity:00.000 mAResistance:0L. OM'
+    + 'Resistance:09.977 KOMbeep:. OMDiode:0.L VCap:-.-- nFCap:00.100 uFCap:00.100 µF'
+    + 'Cap:22.000 mFResistance:.0L MOMVoltage:0.0000 V',
+  );
+  const feed = (chunks: Uint8Array[]) => {
+    const out: Reading[] = [];
+    const f = createByteFeed((rs) => {
+      // An empty batch would pass useSerial's probe on junk alone.
+      assert.ok(rs.length > 0, 'no empty batches');
+      for (const r of rs) out.push({ ...r, ts: 0 });
+    });
+    for (const c of chunks) f.push(c);
+    return out;
+  };
+  const every = (n: number) =>
+    Array.from({ length: Math.ceil(bytes.length / n) }, (_, i) => bytes.subarray(i * n, (i + 1) * n));
+
+  const whole = feed([bytes]);
+  // The trailing measurement is never delimited, so it stays buffered.
+  assert.equal(whole.length, 12, 'every delimited measurement is emitted once');
+  assert.equal(whole.find((r) => r.unit === 'µF')?.value, 0.1, 'µF survives the byte path');
+  assert.deepEqual(feed(every(20)), whole, '20-byte chunks match the whole stream');
+  assert.deepEqual(feed(every(1)), whole, 'byte-by-byte matches the whole stream');
+  for (let i = 1; i < bytes.length; i++) {
+    assert.deepEqual(feed([bytes.subarray(0, i), bytes.subarray(i)]), whole, `cut at ${i}`);
+  }
+  checks += 4 + bytes.length - 1;
+}
 
 console.log(`check-parser: ${checks} assertions passed`);
