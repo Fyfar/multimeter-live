@@ -1,9 +1,9 @@
 # Multimeter·Live
 
 Real-time dashboard for the **ZOYI ZT703s** multimeter, running entirely in the
-browser. Connect the meter over the Web Serial API and watch the readout, trend and
-distribution of your measurements live, log them for up to a week, and export them to
-CSV. There is no backend and nothing to install.
+browser. Connect the meter over USB serial or Bluetooth LE and watch the readout, trend
+and distribution of your measurements live, log them for up to a week, and export them
+to CSV. There is no backend and nothing to install.
 
 [![Build](https://img.shields.io/github/actions/workflow/status/Fyfar/multimeter-live/deploy.yml?branch=main&label=build)](https://github.com/Fyfar/multimeter-live/actions/workflows/deploy.yml)
 [![Version](https://img.shields.io/github/package-json/v/Fyfar/multimeter-live?label=version&color=3b82f6)](https://github.com/Fyfar/multimeter-live/blob/main/package.json)
@@ -20,10 +20,23 @@ Open it in a supported browser (Chrome, Edge, Opera, or Firefox 151+), connect y
 meter, and click **Connect**. Everything runs locally in your browser and no data
 leaves your machine.
 
-After the first time, you mostly stop clicking Connect. The app remembers the adapter
+After the first time, you mostly stop clicking Connect. The app remembers the USB adapter
 you used and picks it back up when you reload or reopen the tab, without the browser's
 port chooser. Pressing Disconnect forgets it again, so if you free the port for
 something else, a reload will not quietly take it back.
+
+### Bluetooth (optional)
+
+You can also read the meter wirelessly through a BLE serial module wired to its UART:
+choose **Bluetooth** on the Connection card, press **Connect**, and pick the module.
+Tested with a **JDY-23**; HM-10 and its clones use the same `FFE0`/`FFE1` profile and will
+probably work, but are untested, as is any other module. Set the module's UART to
+**115200 baud** (the meter's speed) beforehand, following the official documentation for
+your exact module.
+
+Limits: Chromium-based browsers only (Web Bluetooth), no automatic reconnect after a
+reload or a drop, one connection at a time (USB or Bluetooth), and a module already
+connected to another device (e.g. a phone) will not appear in the chooser.
 
 ### Install and offline use
 
@@ -33,9 +46,10 @@ the address-bar install icon and launch it in its own window with its own icon, 
 you would a native desktop program.
 
 After your first visit it works fully offline, which is useful on a bench or in the
-field with no Wi-Fi. The meter connects over USB, so nothing in the app needs the
-network anyway. The same install runs on Windows, macOS, Linux, and ChromeOS, and the
-browser handles the packaging, so there are no separate binaries to maintain or trust.
+field with no Wi-Fi. The meter connects over USB or Bluetooth, so nothing in the app
+needs the network anyway. The same install runs on Windows, macOS, Linux, and ChromeOS,
+and the browser handles the packaging, so there are no separate binaries to maintain or
+trust.
 
 When a new version is published the app does not reload on its own, because that would
 interrupt a recording. It shows a small "A new version is available" notice with Reload
@@ -67,14 +81,16 @@ browser will also ask before the page goes away. You never reinstall to update.
   another, and get a beep and a verdict for each. See below.
 - **Smart capture.** Log only stable values, or arm a trigger threshold so recording
   starts and stops by itself as the signal crosses it.
+- **USB or Bluetooth.** Connect with a USB-UART adapter, or wirelessly through a BLE
+  serial module wired to the meter. The rest of the app works the same either way.
 - **Light and dark themes.** Dark by default. The **Light** / **Dark** button in the
   header switches the whole interface, chart included, instantly and without touching
   the connection or a running recording. The choice is remembered in this browser.
-- **Installable and offline.** A PWA that reconnects to your last adapter on its own and
-  needs no network once loaded.
+- **Installable and offline.** A PWA that reconnects to your last USB adapter on its own
+  and needs no network once loaded.
 
 A week of samples lives in the open tab's memory, so it survives as long as the tab does:
-the connection and your view come back after a reload, but the recorded data does not.
+the USB connection and your view come back after a reload, but the recorded data does not.
 That is deliberate, not an oversight. Export a CSV before you close it.
 
 ## Pass/Fail component testing
@@ -107,13 +123,16 @@ data.
 
 ## Requirements
 
-- A **ZOYI ZT703s** multimeter connected over USB serial (see the device note above).
+- A **ZOYI ZT703s** multimeter connected over USB serial, or through a BLE serial
+  module set to 115200 baud (see Bluetooth above, and the device note).
 - A browser with the Web Serial API: any Chromium-based browser (Chrome, Edge, Opera)
   or **Firefox 151+** on desktop ([added May 2026](https://hacks.mozilla.org/2026/05/web-serial-support-in-firefox/)).
   Safari is not supported. On Firefox Enterprise builds, Web Serial is off by default
   and has to be enabled with the `DefaultSerialGuardSetting` policy.
 - An origin served over `https://` or `localhost`, because Web Serial requires a secure
   context. The live demo is served over HTTPS, so it works as-is.
+- For Bluetooth: a browser with Web Bluetooth (Chromium-based only), in the same secure
+  context.
 
 ## Run it locally
 
@@ -123,7 +142,7 @@ npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000), click **Connect**, and pick your
-serial port from the browser prompt.
+serial port (or, with the switch on Bluetooth, your module) from the browser prompt.
 
 ## Contributing
 

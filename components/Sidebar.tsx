@@ -2,7 +2,8 @@
 
 import { CheckCircle2, FileText, LayoutDashboard, LogOut, Settings } from 'lucide-react';
 import { clsx } from 'clsx';
-import type { SerialStatus } from '@/lib/useSerial';
+import { useState } from 'react';
+import type { ConnectionStatus, Transport } from '@/lib/connection';
 import { BAUD_RATES } from '@/lib/settings';
 
 
@@ -24,34 +25,152 @@ const NAV_ICONS: Record<NavId, React.ReactNode> = {
   settings: <Settings size={15} />,
 };
 
-const STATUS_VIEW: Record<SerialStatus, { label: string; className: string }> = {
+const STATUS_VIEW: Record<ConnectionStatus, { label: string; className: string }> = {
   connected: { label: 'Connected', className: 'text-success' },
   connecting: { label: 'Connecting…', className: 'text-amber' },
   disconnected: { label: 'Disconnected', className: 'text-muted' },
   unsupported: { label: 'Disconnected', className: 'text-muted' },
 };
 
+const TRANSPORT_LABEL: Record<Transport, string> = { uart: 'UART', ble: 'Bluetooth' };
+const UNSUPPORTED_REASON: Record<Transport, string> = {
+  uart: 'Web Serial is not supported in this browser.',
+  ble: 'Bluetooth is not supported in this browser.',
+};
+
+type Conn = {
+  status: ConnectionStatus;
+  error: string | null;
+  connect: () => void;
+  disconnect: () => void;
+};
+
+function Row({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between text-xs">
+      <span className="text-muted">{label}</span>
+      {children}
+    </div>
+  );
+}
+
+// Status, the transport's own rows, error, and Connect/Disconnect — shared by both transports.
+// `cancellable`: Disconnect also ends a connect in progress (BLE only; a UART disconnect
+// mid-probe would forget the remembered port).
+function ConnectionBody({ conn, disabledReason, cancellable, children }: {
+  conn: Conn; disabledReason: string | null; cancellable: boolean; children: React.ReactNode;
+}) {
+  const { status, error } = conn;
+  const connecting = status === 'connecting';
+  return (
+    <div className="space-y-3">
+      <div className="space-y-2">
+        <Row label="Status">
+          <span className={STATUS_VIEW[status].className}>{STATUS_VIEW[status].label}</span>
+        </Row>
+        {children}
+      </div>
+
+      {error && <p className="text-xs text-danger">{error}</p>}
+
+      {status === 'connected' ? (
+        <button
+          onClick={conn.disconnect}
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-danger/30 bg-danger/10 py-1.5 text-xs font-medium text-danger transition-colors hover:bg-danger/20"
+        >
+          <LogOut size={12} />
+          Disconnect
+        </button>
+      ) : connecting && cancellable ? (
+        <button
+          onClick={conn.disconnect}
+          className="w-full rounded-md border border-border py-1.5 text-xs font-medium text-muted transition-colors hover:bg-surface hover:text-fg"
+        >
+          Cancel
+        </button>
+      ) : (
+        <button
+          onClick={conn.connect}
+          disabled={disabledReason !== null || connecting}
+          className="w-full rounded-md bg-accent py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {connecting ? 'Connecting…' : 'Connect'}
+        </button>
+      )}
+      {disabledReason && status !== 'connected' && (
+        <p className="text-xs text-muted">{disabledReason}</p>
+      )}
+    </div>
+  );
+}
+
+function UartRows({ connected, connecting, baud, onBaudChange }: {
+  connected: boolean; connecting: boolean; baud: number; onBaudChange: (b: number) => void;
+}) {
+  return (
+    <Row label="Baud Rate">
+      {connected ? (
+        <span className="font-mono text-fg">{baud} bps</span>
+      ) : (
+        <select
+          value={baud}
+          onChange={(e) => onBaudChange(Number(e.target.value))}
+          disabled={connecting}
+          className="rounded-sm border border-border bg-surface px-1.5 py-0.5 text-xs text-fg disabled:opacity-50"
+        >
+          {BAUD_RATES.map((b) => (
+            <option key={b} value={b}>{b}</option>
+          ))}
+        </select>
+      )}
+    </Row>
+  );
+}
+
+// No baud control: the speed is the module's own setting, not something the app can set.
+function BleRows({ status, deviceName }: { status: ConnectionStatus; deviceName: string | null }) {
+  return (
+    <>
+      <Row label="Module UART">
+        <span className="font-mono text-fg">115200 bps</span>
+      </Row>
+      {status === 'connected' && deviceName ? (
+        <Row label="Device">
+          <span className="truncate pl-2 text-fg">{deviceName}</span>
+        </Row>
+      ) : (
+        <p className="text-[11px] leading-snug text-muted">
+          Not listed? Power the meter, close other apps using the module.
+        </p>
+      )}
+    </>
+  );
+}
+
 export function Sidebar({
-  status,
+  uart,
+  ble,
   baud,
   onBaudChange,
-  onConnect,
-  onDisconnect,
-  error,
+  deviceName,
+  activeTransport,
   active,
   onNavChange,
 }: {
-  status: SerialStatus;
+  uart: Conn;
+  ble: Conn;
   baud: number;
   onBaudChange: (b: number) => void;
-  onConnect: () => void;
-  onDisconnect: () => void;
-  error: string | null;
+  deviceName: string | null;
+  activeTransport: Transport | null;
   active: NavId;
   onNavChange: (id: NavId) => void;
 }) {
-  const connected = status === 'connected';
-  const connecting = status === 'connecting';
+  const [picked, setPicked] = useState<Transport>('uart');
+  // Locked to the busy transport, so the shown body is never the blocked one: the only
+  // reason its Connect can be disabled is browser support.
+  const shown = activeTransport ?? picked;
+  const conn = shown === 'uart' ? uart : ble;
 
   return (
     <aside className="flex w-52 shrink-0 flex-col border-r border-border bg-canvas">
@@ -72,58 +191,50 @@ export function Sidebar({
         ))}
       </nav>
 
-      {/* Connection Card */}
+      {/* Connection */}
       <div className="border-t border-border p-3">
         <div className="space-y-3 rounded-lg border border-border bg-panel p-3">
           <h3 className="text-xs font-semibold text-fg">Connection</h3>
-
-          <div className="space-y-2">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted">Status</span>
-              <span className={STATUS_VIEW[status].className}>{STATUS_VIEW[status].label}</span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted">Interface</span>
-              <span className="text-fg">UART</span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted">Baud Rate</span>
-              {connected ? (
-                <span className="font-mono text-fg">{baud} bps</span>
-              ) : (
-                <select
-                  value={baud}
-                  onChange={(e) => onBaudChange(Number(e.target.value))}
-                  disabled={connecting}
-                  className="rounded-sm border border-border bg-surface px-1.5 py-0.5 text-xs text-fg disabled:opacity-50"
-                >
-                  {BAUD_RATES.map((b) => (
-                    <option key={b} value={b}>{b}</option>
-                  ))}
-                </select>
-              )}
-            </div>
+          <div role="group" aria-label="Transport" className="flex gap-1">
+            {(['uart', 'ble'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setPicked(t)}
+                disabled={activeTransport !== null && activeTransport !== t}
+                aria-pressed={shown === t}
+                aria-describedby={activeTransport && activeTransport !== t ? 'transport-locked' : undefined}
+                className={clsx(
+                  'flex-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
+                  shown === t
+                    ? 'border-accent bg-accent/10 text-accent'
+                    : 'border-border text-muted hover:bg-surface hover:text-fg',
+                )}
+              >
+                {TRANSPORT_LABEL[t]}
+              </button>
+            ))}
           </div>
-
-          {error && <p className="text-xs text-danger">{error}</p>}
-
-          {connected ? (
-            <button
-              onClick={onDisconnect}
-              className="flex w-full items-center justify-center gap-1.5 rounded-md border border-danger/30 bg-danger/10 py-1.5 text-xs font-medium text-danger transition-colors hover:bg-danger/20"
-            >
-              <LogOut size={12} />
-              Disconnect
-            </button>
-          ) : (
-            <button
-              onClick={onConnect}
-              disabled={status === 'unsupported' || connecting}
-              className="w-full rounded-md bg-accent py-1.5 text-xs font-medium text-white transition-colors hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {connecting ? 'Connecting…' : 'Connect'}
-            </button>
+          {activeTransport && (
+            <p id="transport-locked" className="text-[11px] leading-snug text-muted">
+              Disconnect {TRANSPORT_LABEL[activeTransport]} to switch.
+            </p>
           )}
+          <ConnectionBody
+            conn={conn}
+            disabledReason={conn.status === 'unsupported' ? UNSUPPORTED_REASON[shown] : null}
+            cancellable={shown === 'ble'}
+          >
+            {shown === 'uart' ? (
+              <UartRows
+                connected={uart.status === 'connected'}
+                connecting={uart.status === 'connecting'}
+                baud={baud}
+                onBaudChange={onBaudChange}
+              />
+            ) : (
+              <BleRows status={ble.status} deviceName={deviceName} />
+            )}
+          </ConnectionBody>
         </div>
       </div>
     </aside>

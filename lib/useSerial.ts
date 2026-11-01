@@ -1,10 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { createParser, type Reading } from './parser';
+import { createByteFeed, type Reading } from './parser';
+import type { ConnectionStatus } from './connection';
 import { clearPortRecord, loadPortRecord, savePortRecord } from './settings';
-
-export type SerialStatus = 'unsupported' | 'disconnected' | 'connecting' | 'connected';
 
 // How long a candidate port gets to produce its first parseable reading before we give up
 // on it and try the next.
@@ -48,7 +47,7 @@ function errorText(e: unknown): string {
  * SSR / `next build` prerendering never touches a browser-only API.
  */
 export function useSerial(onReadings: (readings: Reading[]) => void) {
-  const [status, setStatus] = useState<SerialStatus>('disconnected');
+  const [status, setStatus] = useState<ConnectionStatus>('disconnected');
   const [error, setError] = useState<string | null>(null);
 
   const portRef = useRef<SerialPort | null>(null);
@@ -69,17 +68,13 @@ export function useSerial(onReadings: (readings: Reading[]) => void) {
 
   const readLoop = useCallback(
     async (port: SerialPort, ctl: LoopControl, onFirstData?: () => void) => {
-      const parser = createParser();
-      const decoder = new TextDecoder();
       let sawData = false;
-      const deliver = (value: Uint8Array) => {
-        const readings = parser.push(decoder.decode(value, { stream: true }));
-        if (!readings.length) return;
+      const feed = createByteFeed((readings) => {
         // Readings parsed during a successful probe are real measurements, not
         // test traffic — they go to the consumer like any other batch.
         if (!sawData) { sawData = true; onFirstData?.(); }
         onReadingsRef.current(readings);
-      };
+      });
 
       while (port.readable && !ctl.stop) {
         const reader = port.readable.getReader();
@@ -88,7 +83,7 @@ export function useSerial(onReadings: (readings: Reading[]) => void) {
           for (;;) {
             const { value, done } = await reader.read();
             if (done) break;
-            if (value) deliver(value);
+            if (value) feed.push(value);
           }
         } catch (e) {
           // Suppress the AbortError thrown by reader.cancel() during a normal disconnect
@@ -231,8 +226,11 @@ export function useSerial(onReadings: (readings: Reading[]) => void) {
     keepReadingRef.current = false;
     await teardown();
     clearPortRecord();
+    setError(null);
     setStatus('disconnected');
   }, [teardown]);
+
+  const clearError = useCallback(() => setError(null), []);
 
   // Reconnect to the last-used device on load, without a port chooser. Best-effort by
   // design: having no previously-authorized port is the normal first-run state, not a
@@ -295,5 +293,5 @@ export function useSerial(onReadings: (readings: Reading[]) => void) {
     };
   }, []);
 
-  return { status, error, connect, disconnect };
+  return { status, error, connect, disconnect, clearError };
 }

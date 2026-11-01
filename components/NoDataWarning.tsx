@@ -1,11 +1,14 @@
 'use client';
 
 import { AlertTriangle } from 'lucide-react';
+import type { Transport } from '@/lib/connection';
 
-// Whole-page, dismissible warning shown when the port is connected but no measurement
-// data is arriving. Purely informational — dismissing it changes nothing about the
-// connection or recording; it only hides this overlay (see page.tsx re-arm logic).
-export function NoDataWarning({ onDismiss }: { onDismiss: () => void }) {
+// Whole-page, dismissible warning shown when the active transport is connected but no
+// measurement data is arriving. Purely informational — dismissing it changes nothing about
+// the connection or recording; it only hides this overlay (see page.tsx re-arm logic).
+export function NoDataWarning({ transport, onDismiss }: {
+  transport: Transport | null; onDismiss: () => void;
+}) {
   return (
     <div
       role="alertdialog"
@@ -25,15 +28,32 @@ export function NoDataWarning({ onDismiss }: { onDismiss: () => void }) {
         </div>
 
         <div id="no-data-body" className="mt-4 space-y-2 text-sm leading-relaxed text-muted">
-          <p>
-            The USB-to-UART adapter is connected and working, but no measurements are
-            coming through. The likely causes:
-          </p>
-          <ul className="list-disc space-y-1 pl-5">
-            <li>The multimeter is turned off.</li>
-            <li>The cable between the adapter and the meter is unplugged or broken.</li>
-          </ul>
-          <p>Check the meter and the lead, then continue. The connection stays open.</p>
+          {transport === 'ble' ? (
+            <>
+              <p>
+                The Bluetooth module is connected, but no measurements are coming through.
+                The likely causes:
+              </p>
+              <ul className="list-disc space-y-1 pl-5">
+                <li>The multimeter is turned off.</li>
+                <li>The module is unpowered or not wired to the meter.</li>
+                <li>The module&apos;s UART speed is not 115200, the meter&apos;s rate.</li>
+              </ul>
+              <p>Check the meter and the module, then continue. The connection stays open.</p>
+            </>
+          ) : (
+            <>
+              <p>
+                The USB-to-UART adapter is connected and working, but no measurements are
+                coming through. The likely causes:
+              </p>
+              <ul className="list-disc space-y-1 pl-5">
+                <li>The multimeter is turned off.</li>
+                <li>The cable between the adapter and the meter is unplugged or broken.</li>
+              </ul>
+              <p>Check the meter and the lead, then continue. The connection stays open.</p>
+            </>
+          )}
         </div>
 
         <button
