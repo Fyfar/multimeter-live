@@ -272,7 +272,7 @@ export function DataLog({
   return (
     <>
       {/* ── Main content (same width as the Dashboard's main: flex-1 + p-5) ── */}
-      <main className="flex min-w-0 flex-1 flex-col gap-4 overflow-hidden p-5">
+      <main tabIndex={-1} className="flex min-w-0 flex-1 flex-col gap-4 overflow-hidden p-5 focus:outline-none">
         {/* Live reading bar */}
         <section className="flex items-center justify-between rounded-lg border border-border bg-panel px-5 py-4 max-lg:flex-wrap max-lg:gap-3">
           <div className="flex items-baseline gap-4">

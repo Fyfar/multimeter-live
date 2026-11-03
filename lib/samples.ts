@@ -6,15 +6,15 @@
 // Columnar by necessity, not by taste. A sample is five scalars (19 B); the same sample as
 // two objects across a chart buffer and a row buffer was 256 B. At the meter's measured 3.03
 // samples/second that is the difference between 35 MB and 469 MB over a seven-day session.
-// The other reason is `snapshot()`: cloning typed arrays is a memcpy, cloning 1.8 M objects
-// is an object-graph walk, which is what makes a future session-restore practical at all.
+// The other reason is persistence: cloning typed arrays is a memcpy, cloning 1.8 M objects is
+// an object-graph walk, which is what makes saving and restoring a session practical at all.
 
 import { SCALE, type Mode } from './parser.ts';
 
 /**
- * Mode dictionary. **The order is part of the snapshot format** — a snapshot records the
- * dictionary it was written with, so appending is safe and reordering is handled by the
- * remap in `SampleStore.from`. Never renumber in place and assume old snapshots follow.
+ * Mode dictionary. **The order is part of the saved-session format** — a saved session
+ * records the dictionary it was written with, so appending is safe and reordering is handled
+ * by the remap in `load`. Never renumber in place and assume old saved sessions follow.
  */
 export const MODES: readonly Mode[] = Object.freeze([
   'VOLTAGE',
@@ -29,14 +29,14 @@ export const MODES: readonly Mode[] = Object.freeze([
  * Unit dictionary: `''` (no unit) followed by every key of `SCALE` in `lib/parser.ts`, in
  * that file's order. **DERIVED, not copied** — a hand-maintained duplicate would drift the
  * moment a unit is added to the parser, and the drifted unit's index is exactly what
- * `MODES`/`UNITS` order promises to keep stable for snapshots.
+ * `MODES`/`UNITS` order promises to keep stable for saved sessions.
  *
  * A store starts from this list but keeps its OWN mutable copy: `lib/parser.ts` documents
  * that what the ZT703s sends above `nF` is unconfirmed, so an unrecognized unit is appended
  * at runtime rather than throwing. A `Uint8Array` leaves ample headroom past the 14 known.
  *
- * Reordering `SCALE` is safe: a snapshot records the dictionary it was written with, and
- * `SampleStore.from` remaps by NAME.
+ * Reordering `SCALE` is safe: a saved session records the dictionary it was written with,
+ * and `load` remaps by NAME.
  */
 export const UNITS: readonly string[] = Object.freeze(['', ...Object.keys(SCALE)]);
 
@@ -108,23 +108,28 @@ const newChunk = (): Chunk => ({
   decimals: new Uint8Array(CHUNK),
 });
 
-const copyChunk = (c: Chunk): Chunk => ({
-  ts: c.ts.slice(),
-  value: c.value.slice(),
-  mode: c.mode.slice(),
-  unit: c.unit.slice(),
-  decimals: c.decimals.slice(),
-});
+/**
+ * A run of consecutive samples as stored in IndexedDB: `n` samples starting at `seq`, as
+ * independent typed arrays (never views — structured clone serializes a view's whole backing
+ * buffer). `mode`/`unit` are indices into the dictionaries the session was written with.
+ */
+export interface Segment {
+  seq: number;
+  n: number;
+  ts: Float64Array;
+  value: Float64Array;
+  mode: Uint8Array;
+  unit: Uint8Array;
+  decimals: Uint8Array;
+}
 
-/** A structured-cloneable snapshot. Carries its dictionaries so `from` can remap. */
-export interface Snapshot {
-  version: 1;
-  modes: string[];
-  units: string[];
+/** What `SampleStore.load` replaces the store with: ordered segments plus their dictionaries. */
+export interface Loadable {
   firstSeq: number;
-  count: number;
-  chunks: Chunk[];
-  notes: [number, string][];
+  modes: readonly string[];
+  units: readonly string[];
+  segments: readonly Segment[];
+  notes: readonly [number, string][];
 }
 
 export class SampleStore {
@@ -132,6 +137,7 @@ export class SampleStore {
   #count = 0;
   /** `seq` of physical index 0. Rises as head chunks are dropped, and across `clear()`. */
   #firstSeq = 0;
+  #generation = 0;
   #notes = new Map<number, string>();
   /** This store's unit dictionary. Starts as `UNITS`, grows if the meter sends a new one. */
   #units: string[] = [...UNITS];
@@ -147,6 +153,20 @@ export class SampleStore {
     return this.#firstSeq;
   }
 
+  /**
+   * Advances only in `clear()`. `clear()` moves `firstSeq` to `firstSeq + count`, which is
+   * exactly what a trim that empties the store does, so `firstSeq`/`count` alone cannot tell
+   * "the operator cleared" from "retention expired" — and the saved copy must end on a clear
+   * but only shrink on a trim.
+   */
+  get generation(): number {
+    return this.#generation;
+  }
+
+  /** A copy of this store's unit dictionary; it grows when the meter sends a new unit. */
+  get unitDictionary(): string[] {
+    return [...this.#units];
+  }
   /** Append one sample; returns its `seq`. Writes into the tail chunk and never copies. */
   append(ts: number, value: number, mode: Mode, unit: string, decimals: number): number {
     const i = this.#count;
@@ -185,6 +205,46 @@ export class SampleStore {
     return this.#chunks[i >>> CHUNK_SHIFT].value[i & CHUNK_MASK];
   }
 
+  /** Displayed fractional digits at physical index `i`. Allocates nothing. */
+  decimalsAt(i: number): number {
+    return this.#chunks[i >>> CHUNK_SHIFT].decimals[i & CHUNK_MASK];
+  }
+
+  /** Wire unit at physical index `i`. Allocates nothing. */
+  unitAt(i: number): string {
+    return this.#units[this.#chunks[i >>> CHUNK_SHIFT].unit[i & CHUNK_MASK]];
+  }
+
+  /**
+   * `n` samples from physical index `from`, copied into fresh arrays. Written to span chunk
+   * boundaries even though the 256-sample grid never does: a copy that silently stopped at the
+   * edge of a chunk would persist zeros.
+   */
+  segment(from: number, n: number): Segment {
+    const out: Segment = {
+      seq: this.#firstSeq + from,
+      n,
+      ts: new Float64Array(n),
+      value: new Float64Array(n),
+      mode: new Uint8Array(n),
+      unit: new Uint8Array(n),
+      decimals: new Uint8Array(n),
+    };
+    for (let o = 0; o < n; ) {
+      const i = from + o;
+      const slot = i & CHUNK_MASK;
+      const len = Math.min(n - o, CHUNK - slot);
+      const c = this.#chunks[i >>> CHUNK_SHIFT];
+      out.ts.set(c.ts.subarray(slot, slot + len), o);
+      out.value.set(c.value.subarray(slot, slot + len), o);
+      out.mode.set(c.mode.subarray(slot, slot + len), o);
+      out.unit.set(c.unit.subarray(slot, slot + len), o);
+      out.decimals.set(c.decimals.subarray(slot, slot + len), o);
+      o += len;
+    }
+    return out;
+  }
+
   /**
    * The sample at physical index `i`, as an object.
    *
@@ -207,6 +267,11 @@ export class SampleStore {
       decimals: chunk.decimals[slot],
       note: this.#notes.get(seq) ?? '',
     };
+  }
+
+  /** Every note as `[seq, text]`, for the saved copy. */
+  get notes(): [number, string][] {
+    return [...this.#notes];
   }
 
   /** The note on `seq`, or `''`. */
@@ -274,6 +339,7 @@ export class SampleStore {
    * blank chart over a full Data Log, with nothing to see in a debugger.
    */
   clear(): void {
+    this.#generation += 1;
     this.#firstSeq += this.#count;
     this.#count = 0;
     this.#chunks = [];
@@ -281,74 +347,85 @@ export class SampleStore {
   }
 
   /**
-   * A structured-cloneable copy. Nothing calls this yet: it exists so the store is verifiable
-   * by round-trip today and so session restore is later a storage decision rather than a
-   * rewrite of the data model. See design.md "Non-Goals".
+   * Replace this store's contents in place from ordered segments, keeping the instance (the
+   * page and the engine hold it). Built into a scratch store first and swapped in only if that
+   * succeeds, so a rejected load — a gap, an unknown mode — leaves the live session intact.
+   * `generation` is deliberately not touched: that is the caller's to resync. Returns whether
+   * the bytes had to be remapped onto this build's dictionaries, so RAM no longer matches the
+   * stored segments byte for byte.
    */
-  snapshot(): Snapshot {
-    return {
-      version: 1,
-      modes: [...MODES],
-      units: [...this.#units],
-      firstSeq: this.#firstSeq,
-      count: this.#count,
-      // COPIED, not referenced. Handing out the live backing stores would make
-      // `SampleStore.from(store.snapshot())` share memory with `store`: both would write
-      // slot N of the same chunk, each silently overwriting the other's samples, and
-      // `from`'s dictionary remap would rewrite the original store in place. The copy is
-      // one memcpy — the same cost `structuredClone` would pay on the way to storage.
-      chunks: this.#chunks.map(copyChunk),
-      notes: [...this.#notes],
-    };
+  load(src: Loadable): boolean {
+    const next = new SampleStore();
+    next.#firstSeq = src.firstSeq;
+    let at = 0;
+    for (const s of src.segments) {
+      if (s.seq !== src.firstSeq + at) {
+        throw new Error(`segment at seq ${s.seq} does not follow seq ${src.firstSeq + at}`);
+      }
+      if (s.n < 1 || [s.ts, s.value, s.mode, s.unit, s.decimals].some((a) => a.length !== s.n)) {
+        throw new Error(`segment at seq ${s.seq} has inconsistent lengths`);
+      }
+      for (let o = 0; o < s.n; ) {
+        const i = at + o;
+        const slot = i & CHUNK_MASK;
+        const len = Math.min(s.n - o, CHUNK - slot);
+        if (slot === 0) next.#chunks.push(newChunk());
+        const c = next.#chunks[i >>> CHUNK_SHIFT];
+        c.ts.set(s.ts.subarray(o, o + len), slot);
+        c.value.set(s.value.subarray(o, o + len), slot);
+        c.mode.set(s.mode.subarray(o, o + len), slot);
+        c.unit.set(s.unit.subarray(o, o + len), slot);
+        c.decimals.set(s.decimals.subarray(o, o + len), slot);
+        o += len;
+      }
+      at += s.n;
+    }
+    next.#count = at;
+    next.#notes = new Map(src.notes);
+    const remapped = next.#remap(src.modes, src.units);
+
+    this.#chunks = next.#chunks;
+    this.#count = next.#count;
+    this.#firstSeq = next.#firstSeq;
+    this.#notes = next.#notes;
+    this.#units = next.#units;
+    this.#unitIndex = next.#unitIndex;
+    return remapped;
   }
 
   /**
-   * Rebuild from a snapshot, remapping its dictionaries onto the current ones. The remap is
-   * what makes the dictionaries safe to reorder or extend later: a snapshot written before
-   * such a change still reads back as the same measurements.
-   *
-   * Copies `snap.chunks` rather than adopting them, so one `Snapshot` can be restored more
-   * than once — a retry after a failed restore, or two sessions from one saved file — without
-   * the two stores sharing memory. Adopting them would reproduce the aliasing bug one level
-   * removed: `store` would be safe while two restores silently overwrote each other.
-   * Throws if the snapshot names a mode this build no longer has.
+   * Rewrite the stored mode/unit bytes from the dictionaries they were written with onto this
+   * build's. Returns whether any byte was rewritten.
    */
-  static from(snap: Snapshot): SampleStore {
-    const store = new SampleStore();
-    store.#firstSeq = snap.firstSeq;
-    store.#count = snap.count;
-    store.#chunks = snap.chunks.map(copyChunk);
-    store.#notes = new Map(snap.notes);
-
+  #remap(modes: readonly string[], units: readonly string[]): boolean {
     // Units auto-extend (`#unitId`), so they can never fail to resolve. MODES is fixed and
-    // frozen, so a name that is gone means the snapshot predates a breaking change to the
+    // frozen, so a name that is gone means the saved session predates a breaking change to the
     // dictionary. Fall back to index 0 and every affected sample silently becomes VOLTAGE —
     // wrong data presented as right, which is the one outcome worth refusing to produce.
-    const modeMap = snap.modes.map((m) => {
+    const modeMap = modes.map((m) => {
       const i = MODES.indexOf(m as Mode);
-      if (i === -1) throw new Error(`snapshot has unknown mode ${JSON.stringify(m)}`);
+      if (i === -1) throw new Error(`saved session has unknown mode ${JSON.stringify(m)}`);
       return i;
     });
-    const unitMap = snap.units.map((u) => store.#unitId(u));
+    const unitMap = units.map((u) => this.#unitId(u));
     const identity = (m: number[], n: number) =>
       m.length <= n && m.every((v, i) => v === i);
 
-    if (!identity(modeMap, MODES.length) || !identity(unitMap, store.#units.length)) {
-      for (let i = 0; i < store.#count; i++) {
-        const chunk = store.#chunks[i >>> CHUNK_SHIFT];
-        const slot = i & CHUNK_MASK;
-        // Every byte this module writes is a valid index by construction, so the lookups
-        // always hit. A hand-crafted snapshot could carry an out-of-range byte; writing the
-        // resulting `undefined` into a Uint8Array coerces to 0 silently, so be explicit.
-        const m = modeMap[chunk.mode[slot]];
-        const u = unitMap[chunk.unit[slot]];
-        if (m === undefined || u === undefined) {
-          throw new Error(`snapshot has an out-of-range dictionary index at sample ${i}`);
-        }
-        chunk.mode[slot] = m;
-        chunk.unit[slot] = u;
+    if (identity(modeMap, MODES.length) && identity(unitMap, this.#units.length)) return false;
+    for (let i = 0; i < this.#count; i++) {
+      const chunk = this.#chunks[i >>> CHUNK_SHIFT];
+      const slot = i & CHUNK_MASK;
+      // Every byte this module writes is a valid index by construction, so the lookups
+      // always hit. A hand-crafted saved session could carry an out-of-range byte; writing the
+      // resulting `undefined` into a Uint8Array coerces to 0 silently, so be explicit.
+      const m = modeMap[chunk.mode[slot]];
+      const u = unitMap[chunk.unit[slot]];
+      if (m === undefined || u === undefined) {
+        throw new Error(`saved session has an out-of-range dictionary index at sample ${i}`);
       }
+      chunk.mode[slot] = m;
+      chunk.unit[slot] = u;
     }
-    return store;
+    return true;
   }
 }
