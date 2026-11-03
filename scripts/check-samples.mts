@@ -17,7 +17,6 @@ import {
   SampleStore,
   UNITS,
   type Sample,
-  type Snapshot,
 } from '../lib/samples.ts';
 import { SCALE, type Mode } from '../lib/parser.ts';
 
@@ -234,24 +233,6 @@ const sameSample = (a: Sample, b: Sample, where: string) => {
   checks += 3;
 }
 
-// --- snapshot round-trip ---------------------------------------------------------
-{
-  const store = new SampleStore();
-  const N = CHUNK + 777;
-  for (let i = 0; i < N; i++) {
-    store.append(1000 + i * 330, i * 1e-4, MODES[i % MODES.length], UNITS[1 + (i % 5)], i % 5);
-  }
-  store.trim(1000 + 100 * 330); // exercise a non-zero firstSeq
-  store.setNote(store.firstSeq + 3, 'annotated');
-
-  const back = SampleStore.from(store.snapshot());
-  assert.equal(back.count, store.count, 'round-trip: count');
-  assert.equal(back.firstSeq, store.firstSeq, 'round-trip: firstSeq');
-  for (let i = 0; i < store.count; i++) sameSample(back.at(i), store.at(i), `round-trip at(${i})`);
-  assert.equal(back.at(3).note, 'annotated', 'round-trip: notes');
-  checks += 3;
-}
-
 // --- the chart's x-axis anchor across a preserve-log mode change --------------------
 // `app/page.tsx` derives the anchor as `tsAt(watermark - firstSeq)` — the oldest sample the
 // chart can see. The regression this pins: tracking a candidate DURING the batch instead
@@ -293,124 +274,18 @@ const sameSample = (a: Sample, b: Sample, where: string) => {
   checks += 8;
 }
 
-// --- snapshot independence: a restored store must NOT share memory ----------------
-// The defect this guards: `snapshot()` handing out the live backing stores makes
-// `from(store.snapshot())` alias `store`. Both then write slot N of the SAME chunk, each
-// silently overwriting the other, and `from`'s dictionary remap rewrites the original store
-// in place. Two "independent" stores corrupting each other is invisible until someone reads
-// the data back, which for a restore feature is months later.
-{
-  const store = new SampleStore();
-  for (let i = 0; i < 5; i++) store.append(1000 + i, i, 'VOLTAGE', 'V', 2);
-  const back = SampleStore.from(store.snapshot());
-
-  // Each store appends its own 6th sample into what would be the same slot.
-  back.append(9999, 777, 'CURRENT', 'A', 3);
-  store.append(5000, 42, 'RESISTANCE', 'OM', 1);
-
-  assert.equal(back.at(5).value, 777, 'the restored store kept ITS OWN sample');
-  assert.equal(back.at(5).mode, 'CURRENT', 'and its own mode');
-  assert.equal(store.at(5).value, 42, 'the source store kept its own sample');
-  assert.equal(store.at(5).mode, 'RESISTANCE', 'and its own mode');
-
-  // Mutating one store's existing data must not reach the other.
-  back.setNote(back.firstSeq, 'restored only');
-  assert.equal(store.noteOf(store.firstSeq), '', 'notes are not shared either');
-  checks += 5;
-}
-
-// --- one snapshot, restored twice, gives two independent stores --------------------
-// The aliasing bug one level removed: with `from()` adopting the snapshot's chunks instead
-// of copying them, the SOURCE store is safe but the two restores silently overwrite each
-// other. A retry after a failed restore, or two sessions opened from one saved file, is a
-// natural way to hit it.
-{
-  const store = new SampleStore();
-  for (let i = 0; i < 5; i++) store.append(1000 + i, i, 'VOLTAGE', 'V', 2);
-  const snap = store.snapshot();
-
-  const a = SampleStore.from(snap);
-  const b = SampleStore.from(snap);
-  a.append(9999, 111, 'CURRENT', 'A', 1);
-  b.append(8888, 222, 'RESISTANCE', 'OM', 1);
-
-  assert.equal(a.at(5).value, 111, 'restore A kept its own sample');
-  assert.equal(a.at(5).mode, 'CURRENT', 'restore A kept its own mode');
-  assert.equal(b.at(5).value, 222, 'restore B kept its own sample');
-  assert.equal(store.count, 5, 'the source store is untouched by either restore');
-  checks += 4;
-}
-
-// --- a snapshot naming a mode this build no longer has must FAIL LOUDLY -------------
-// Units auto-extend and can never fail to resolve; MODES is fixed. A silent fallback to
-// index 0 would relabel every affected sample as VOLTAGE — wrong data presented as right.
-{
-  const store = new SampleStore();
-  store.append(1000, 1, 'DIODE', 'V', 2);
-  const snap = store.snapshot();
-  const renamed: Snapshot = {
-    ...snap,
-    modes: snap.modes.map((m) => (m === 'DIODE' ? 'DIODE_TEST' : m)),
-  };
-  assert.throws(
-    () => SampleStore.from(renamed),
-    /unknown mode/,
-    'a vanished mode throws instead of silently becoming VOLTAGE',
-  );
-  checks++;
-}
-
-// --- snapshot round-trip through a REORDERED dictionary ---------------------------
-// The reason a snapshot carries its dictionaries. Simulates a future edit to MODES/UNITS:
-// the stored indices are stale, and `from` must remap them by NAME, not trust the numbers.
-{
-  const store = new SampleStore();
-  const written: { mode: Mode; unit: string }[] = [];
-  for (let i = 0; i < 40; i++) {
-    const mode = MODES[i % MODES.length];
-    const unit = UNITS[1 + (i % 6)];
-    store.append(1000 + i, i, mode, unit, 2);
-    written.push({ mode, unit });
-  }
-
-  const snap = store.snapshot();
-  // Reorder both dictionaries and renumber the stored indices to match, exactly as a
-  // snapshot written by an older build with a different table order would look.
-  const oldModes = [...snap.modes].reverse();
-  const oldUnits = [...snap.units].reverse();
-  const remap = (list: string[], old: string[]) =>
-    list.map((name) => old.indexOf(name));
-  const modeTo = remap([...snap.modes], oldModes);
-  const unitTo = remap([...snap.units], oldUnits);
-  for (let i = 0; i < snap.count; i++) {
-    const chunk = snap.chunks[i >>> 14];
-    const slot = i & (CHUNK - 1);
-    chunk.mode[slot] = modeTo[chunk.mode[slot]];
-    chunk.unit[slot] = unitTo[chunk.unit[slot]];
-  }
-  const reordered: Snapshot = { ...snap, modes: oldModes, units: oldUnits };
-
-  const back = SampleStore.from(reordered);
-  assert.equal(back.count, written.length, 'reordered round-trip: count');
-  for (let i = 0; i < written.length; i++) {
-    assert.equal(back.at(i).mode, written[i].mode, `reordered dictionary: mode at ${i}`);
-    assert.equal(back.at(i).unit, written[i].unit, `reordered dictionary: unit at ${i}`);
-  }
-  checks += 3;
-}
-
 // --- retention, measured rather than re-typed -------------------------------------
 // A literal compared against a copy of itself proves nothing (docs/quality.md). These
 // assert what the memory arithmetic in design.md actually rests on.
 {
-  // Bytes per sample, MEASURED off a real chunk's backing stores — not the literal 19.
-  // A sixth column, or f64 where the design says u8, changes this and must fail here.
+  // Bytes per sample, MEASURED off real columns — not the literal 19. A segment copies the
+  // chunk's typed arrays, so a sixth column, or f64 where the design says u8, changes this.
   const probe = new SampleStore();
   probe.append(1, 1, 'VOLTAGE', 'V', 2);
-  const c = probe.snapshot().chunks[0];
+  const c = probe.segment(0, 1);
   const bytesPerSample =
-    (c.ts.byteLength + c.value.byteLength + c.mode.byteLength +
-     c.unit.byteLength + c.decimals.byteLength) / CHUNK;
+    c.ts.byteLength + c.value.byteLength + c.mode.byteLength +
+    c.unit.byteLength + c.decimals.byteLength;
   assert.equal(bytesPerSample, 19, `19 B/sample (measured ${bytesPerSample})`);
 
   const samples = Math.round((RETENTION_MS / 1000) * 3.03); // the meter's measured rate
@@ -445,7 +320,7 @@ const sameSample = (a: Sample, b: Sample, where: string) => {
   // `['', ...Object.keys(SCALE)]` would compare the definition to itself and could only fail
   // if someone hand-edited UNITS — it gives no protection against SCALE itself gaining,
   // losing or misspelling a unit, which is the drift that actually matters, because the
-  // ORDER of this list is part of the snapshot format.
+  // ORDER of this list is part of the saved-session format.
   const EXPECTED_UNITS = [
     '', 'V', 'mV', 'A', 'mA', 'OM', 'KOM', 'MOM',
     'pF', 'nF', 'uF', '\u00B5F', '\u03BCF', 'mF',
@@ -455,6 +330,151 @@ const sameSample = (a: Sample, b: Sample, where: string) => {
   assert.equal(new Set(['\u00B5F', '\u03BCF', 'uF']).size, 3, 'the three micro spellings differ');
   assert.equal(Object.keys(SCALE).length, EXPECTED_UNITS.length - 1, 'SCALE has not gained or lost a unit');
   checks += 8;
+}
+
+// --- generation: advanced by clear() and by nothing else --------------------------
+// A trim that empties the store leaves firstSeq/count identical to a clear(), so the saved
+// copy can only tell "operator cleared" from "retention expired" through this counter.
+{
+  const s = new SampleStore();
+  assert.equal(s.generation, 0, 'a new store starts at generation 0');
+  s.append(1, 1, 'VOLTAGE', 'V', 1);
+  s.clear();
+  assert.equal(s.generation, 1, 'clear() advances the generation');
+  s.append(2, 1, 'VOLTAGE', 'V', 1);
+  assert.equal(s.trim(Infinity), true, 'the trim emptied the store');
+  assert.equal(s.count, 0, 'store is empty after the trim');
+  assert.equal(s.generation, 1, 'a trim that empties the store does NOT advance it');
+  checks += 5;
+}
+
+// --- segments: independent copies; load() rebuilds the store row for row ------------
+const allRows = (s: SampleStore) => Array.from({ length: s.count }, (_, i) => s.at(i));
+const segmentsOf = (s: SampleStore, size: number) => {
+  const out = [];
+  for (let i = 0; i < s.count; i += size) out.push(s.segment(i, Math.min(size, s.count - i)));
+  return out;
+};
+const loadableOf = (s: SampleStore, size = 256) => ({
+  firstSeq: s.firstSeq,
+  modes: [...MODES],
+  units: s.unitDictionary,
+  segments: segmentsOf(s, size),
+  notes: [...allRows(s)].filter((r) => r.note !== '').map((r) => [r.seq, r.note] as [number, string]),
+});
+const sameStore = (a: SampleStore, b: SampleStore, where: string) => {
+  checks += 2 + a.count * 7;
+  assert.equal(a.count, b.count, `${where}: count`);
+  assert.equal(a.firstSeq, b.firstSeq, `${where}: firstSeq`);
+  for (let i = 0; i < a.count; i++) sameSample(a.at(i), b.at(i), `${where} row ${i}`);
+};
+
+// A session across three chunks and a partial tail, with a unit added mid-session (index
+// past the built-ins) and notes on rows either side of a chunk boundary.
+const sessionStore = (rows: number, startOffset = 0) => {
+  const s = new SampleStore();
+  if (startOffset > 0) {
+    for (let i = 0; i < startOffset; i++) s.append(i, i, 'VOLTAGE', 'V', 1);
+    s.clear();
+  }
+  for (let i = 0; i < rows; i++) {
+    const unit = i < 5000 ? UNITS[1 + (i % (UNITS.length - 1))] : 'GF';
+    s.append(2_000_000 + i * 330, i * 1e-3 + 0.5, MODES[i % MODES.length], unit, i % 7);
+  }
+  s.setNote(s.firstSeq + 3, 'first');
+  s.setNote(s.firstSeq + CHUNK - 1, 'edge a');
+  s.setNote(s.firstSeq + CHUNK, 'edge b');
+  s.setNote(s.firstSeq + rows - 1, 'last');
+  return s;
+};
+
+{
+  const N = CHUNK * 2 + 700;
+  const src = sessionStore(N);
+
+  // Not views: structured clone serializes a view's WHOLE backing buffer, so a subarray of
+  // a 304 KB chunk would persist 304 KB per 256-sample segment.
+  const seg = src.segment(0, 256);
+  assert.equal(seg.ts.buffer.byteLength, 256 * 8, 'a segment owns exactly its own bytes');
+  assert.equal(seg.mode.buffer.byteLength, 256, 'u8 columns too');
+  const before = src.at(10).value;
+  seg.value[10] = -1;
+  assert.equal(src.at(10).value, before, 'writing a segment does not touch the store');
+
+  // A read that straddles a chunk boundary (the 256 grid never does, but a copy that stops
+  // at the edge would persist zeros).
+  const straddle = src.segment(CHUNK - 100, 256);
+  for (let k = 0; k < 256; k++) {
+    assert.equal(straddle.ts[k], src.tsAt(CHUNK - 100 + k), `straddle ts ${k}`);
+    assert.equal(straddle.value[k], src.valueAt(CHUNK - 100 + k), `straddle value ${k}`);
+  }
+  assert.equal(straddle.seq, src.firstSeq + CHUNK - 100, 'a segment is keyed by absolute seq');
+  checks += 5 + 512;
+
+  // Loaded store == original, row for row, notes included; into an EMPTY store and into a
+  // store that already holds a different session (the live one a restore replaces).
+  for (const size of [256, 1000, N]) {
+    const dst = new SampleStore();
+    dst.load(loadableOf(src, size));
+    sameStore(dst, src, `load(${size}) into empty`);
+  }
+  const live = sessionStore(50);
+  const gen = live.generation;
+  assert.equal(live.load(loadableOf(src)), false, 'this build\'s own dictionaries: nothing remapped');
+  sameStore(live, src, 'load into a populated store');
+  assert.equal(live.generation, gen, 'load() leaves generation to the caller');
+  assert.deepEqual(live.unitDictionary, src.unitDictionary, 'dictionary is the loaded one, not merged');
+  // The loaded store is live: appending continues the seq line, and the rows are independent.
+  const nextSeq = live.append(9e9, 1, 'VOLTAGE', 'V', 1);
+  assert.equal(nextSeq, src.firstSeq + N, 'appending after a load continues the seq line');
+  assert.equal(src.count, N, 'the source store is unaffected');
+  checks += 3;
+}
+
+// Saved by a build whose unit dictionary had two entries swapped and whose mode list ran in
+// reverse: the bytes are rewritten by NAME, the rows keep their mode and unit, and load() says
+// so (the persister must then rewrite storage whole).
+{
+  const dict = new SampleStore().unitDictionary;
+  const old = [dict[1], dict[0], ...dict.slice(2)];
+  const oldModes = [...MODES].reverse();
+  const seg = { seq: 0, n: 2, ts: new Float64Array([1, 2]), value: new Float64Array([1, 2]),
+    mode: new Uint8Array([0, oldModes.length - 1]), unit: new Uint8Array([0, 1]), decimals: new Uint8Array([3, 3]) };
+  const dst = new SampleStore();
+  assert.equal(dst.load({ firstSeq: 0, modes: oldModes, units: old, segments: [seg], notes: [] }), true, 'a reordered dictionary is remapped');
+  assert.deepEqual([dst.unitAt(0), dst.unitAt(1)], [dict[1], dict[0]], 'each row keeps the unit it was saved with');
+  assert.deepEqual([dst.at(0).mode, dst.at(1).mode], [oldModes[0], oldModes[oldModes.length - 1]], 'and the mode');
+  checks += 3;
+}
+
+// firstSeq unaligned after a clear(), as a second session in the same page
+{
+  const src = sessionStore(CHUNK + 300, 12_345);
+  assert.equal(src.firstSeq, 12_345, 'precondition: firstSeq is not chunk-aligned');
+  const dst = new SampleStore();
+  dst.load(loadableOf(src));
+  sameStore(dst, src, 'load with unaligned firstSeq');
+}
+
+// A rejected load changes nothing: the live session survives a bad restore
+{
+  const src = sessionStore(2000);
+  const good = loadableOf(src);
+  const live = sessionStore(40);
+  const frozen = allRows(live);
+
+  const gap = { ...good, segments: good.segments.filter((_, i) => i !== 3) };
+  assert.throws(() => live.load(gap), /does not follow/, 'a missing middle segment is rejected');
+  const badMode = { ...good, modes: ['VOLTAGE', 'BOGUS'] };
+  assert.throws(() => live.load(badMode), /unknown mode/, 'an unknown mode is rejected');
+  const badLen = { ...good, segments: [{ ...good.segments[0], n: 999 }, ...good.segments.slice(1)] };
+  assert.throws(() => live.load(badLen), /inconsistent lengths/, 'a segment whose arrays disagree with n');
+  const badStart = { ...good, firstSeq: good.firstSeq + 1 };
+  assert.throws(() => live.load(badStart), /does not follow/, 'segments that do not start at firstSeq');
+
+  assert.equal(live.count, 40, 'live count unchanged after rejected loads');
+  frozen.forEach((row, i) => sameSample(live.at(i), row, `live row ${i} after rejected loads`));
+  checks += 4 + 1 + 40;
 }
 
 console.log(`check-samples: ${checks} assertions passed`);

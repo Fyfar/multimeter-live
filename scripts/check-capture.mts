@@ -6,7 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { CaptureEngine, type CaptureSettings } from '../lib/capture.ts';
-import { SampleStore, CHUNK, RETENTION_MS } from '../lib/samples.ts';
+import { SampleStore, CHUNK, MODES, RETENTION_MS } from '../lib/samples.ts';
 import { resolveBand } from '../lib/passfail.ts';
 import type { Mode, Reading } from '../lib/parser.ts';
 
@@ -234,12 +234,157 @@ const tenKOnView = () => {
 // --- retention -------------------------------------------------------------------------
 {
   const { store, e } = fresh();
-  const old = Date.now() - RETENTION_MS - 60_000;
+  const old = Date.now() - RETENTION_MS - 600_000;
   e.ingest([rd('RESISTANCE', '1.000', 'KOM', old)]);
   e.setRecording(true, true);
   const r = e.ingest(Array.from({ length: CHUNK + 1 }, (_, i) => rd('RESISTANCE', '1.000', 'KOM', old + i)));
-  eq([r.trimmed, r.touched, store.count], [true, true, 0], 'samples past retention are trimmed');
+  eq([r.trimmed, store.count], [false, CHUNK + 1], 'old samples alone stay: the window ends at the newest sample');
+  e.setRecording(false);
+  eq(e.ingest([R('1.000')]).trimmed, false, 'readings while not recording add nothing, so trim nothing');
+  e.setRecording(true, true);
+  const r2 = e.ingest([R('1.000')]);
+  eq([r2.trimmed, r2.touched, store.count], [true, true, 2], 'a sample past the window drops the old chunk');
   eq(e.ingest([R('1.000')]).trimmed, false, 'recent samples are not');
+}
+
+// --- restore: derived state is recomputed from the rows and must equal the live-built state -----
+// The persisted copy holds samples only; stats, histogram counts, recorded resolution and the
+// dominant value are replayed through the same accumulator `ingest` uses. "Close enough" is not
+// the bar: the Statistics panel and the Data Log must agree after a restore.
+const track = (e: CaptureEngine) => {
+  let stats: unknown = null;
+  return {
+    ingest(rs: Reading[]) {
+      const r = e.ingest(rs);
+      if (r.reset) stats = null;
+      if (r.stats) stats = r.stats;
+      return r;
+    },
+    get stats() { return stats; },
+  };
+};
+const moveTo = (
+  src: { store: SampleStore; e: CaptureEngine },
+  settings: Partial<CaptureSettings> = {},
+  into = fresh(settings),
+) => {
+  const { store, e } = into;
+  store.load({
+    firstSeq: src.store.firstSeq,
+    modes: MODES,
+    units: src.store.unitDictionary,
+    segments: src.store.count > 0 ? [src.store.segment(0, src.store.count)] : [],
+    notes: [],
+  });
+  const res = e.restore({ ...src.e.context, mode: src.e.context.mode!, verdicts: src.e.passFailRows });
+  return { store, e, res };
+};
+const C = (d: string, unit = 'nF') => rd('CAPACITANCE', d, unit);
+const sessions: [string, Partial<CaptureSettings>, (t: ReturnType<typeof track>, e: CaptureEngine) => void][] = [
+  ['mixed LSDs and units', {}, (t) => {
+    t.ingest([R('10.000')]);
+    t.ingest([R('10.000'), R('10.002'), R('9.998'), rd('RESISTANCE', '10001', 'OM'), rd('RESISTANCE', '0.0100', 'MOM'), R('10.000')]);
+  }],
+  ['stable-only', { stableOnly: true }, (t) => {
+    t.ingest([R('10.000')]);
+    t.ingest(times(5, () => R('10.000')));
+    t.ingest([OL(), R('10.000'), R('10.000'), R('30.000'), R('30.000'), R('31.000')]);
+  }],
+  ['after a preserve-log mode change', { preserveOnModeChange: true }, (t) => {
+    t.ingest([R('10.000')]);
+    t.ingest([R('10.000'), R('10.001')]);
+    t.ingest([rd('VOLTAGE', '1.500', 'V'), rd('VOLTAGE', '1.502', 'V'), rd('VOLTAGE', '1500', 'mV')]);
+  }],
+  ['capacitance (nF base) across units', {}, (t) => {
+    t.ingest([C('100.0')]);
+    t.ingest([C('100.0'), C('100.1'), C('1.200', 'uF'), C('3.30', 'mF'), C('820.0', 'pF'), C('100.0')]);
+  }],
+];
+for (const [name, settings, play] of sessions) {
+  const live = fresh(settings);
+  const t = track(live.e);
+  live.e.setRecording(true, true);
+  play(t, live.e);
+  const back = moveTo(live, settings);
+  eq(back.res.stats, t.stats, `${name}: statistics rebuilt exactly (mean, m2, min, max)`);
+  eq(back.e.counts, live.e.counts, `${name}: histogram counts rebuilt exactly`);
+  eq([back.res.recordedResolution, back.res.dominantValue],
+    [live.e.ingest([]).recordedResolution, live.e.ingest([]).dominantValue], `${name}: resolution and dominant value`);
+  eq(back.e.chartFromSeq, live.e.chartFromSeq, `${name}: watermark`);
+  eq(back.e.recording, false, `${name}: recording stays off even though the live session was recording`);
+}
+
+// a resistance session with `n` recorded rows
+const recorded = (n: number) => {
+  const live = fresh();
+  live.e.ingest([R('10.000')]);
+  live.e.setRecording(true, true);
+  live.e.ingest(times(n, () => R('10.000')));
+  return live;
+};
+
+// the next reading after a restore, in the same mode, is just a reading
+{
+  const { store, e } = moveTo(recorded(4));
+  const r = e.ingest([R('10.000')]);
+  eq([r.reset, r.modeReset, store.count], [false, false, 4], 'same-mode reading after a restore does not flush');
+  e.setRecording(true, true);
+  e.ingest([R('10.000')]);
+  eq(store.count, 5, 'recording after a restore appends to the restored rows');
+  e.ingest([rd('VOLTAGE', '1.500', 'V')]);
+  eq(store.count, 0, 'a same-mode first reading spends the guard: a later mode change follows the setting');
+}
+
+// the first mode change after a restore keeps the log even with keep-log off; the second does not
+{
+  const live = fresh();
+  live.e.ingest([R('10.000')]);
+  passFail(live.e, 10_000, 5);
+  live.e.setRecording(true, true);
+  live.e.ingest([R('10.000'), R('10.000'), R('10.000')]);
+  eq(live.e.passFailRows.length, 1, 'precondition: a verdict row exists');
+  const { store, e } = moveTo(live);
+  const r = e.ingest([rd('VOLTAGE', '1.500', 'V')]);
+  eq([r.modeReset, r.reset, store.count, e.passFailRows.length], [true, true, 3, 1],
+    'restored log and verdicts survive the first mode change');
+  eq(e.chartFromSeq, store.firstSeq + 3, 'the chart restarts past the restored rows');
+  e.ingest([rd('RESISTANCE', '10.000', 'KOM')]);
+  eq([store.count, e.passFailRows.length], [0, 0], 'the second mode change follows the setting');
+}
+
+// guard spent by a Clear: a later change is an ordinary one
+{
+  const { store, e } = moveTo(recorded(2));
+  e.flush();
+  e.ingest([rd('VOLTAGE', '1.500', 'V')]);
+  eq(store.count, 0, 'a Clear after a restore spends the guard');
+}
+
+// a restore disarms this engine's trigger and Pass/Fail reference itself: readings held during
+// the restore are replayed before the page's effects could clear them
+{
+  const target = fresh();
+  target.e.ingest([R('10.000')]);
+  target.e.setTriggerArmed(true); target.e.setTriggerThreshold(5_000);
+  passFail(target.e, 10_000, 5);
+  const { store, e } = moveTo(recorded(3), {}, target);
+  const r = e.ingest([R('20.000'), R('20.000'), R('20.000')]);
+  eq([r.reset, r.recordingChanged, store.count], [false, false, 3], 'an armed trigger does not fire on the restored session');
+  eq(e.passFailRows.length, 0, 'no verdict is captured against the pre-restore reference');
+}
+
+// restored verdict ids never collide with the next captured row
+{
+  const live = fresh();
+  live.e.ingest([R('10.000')]);
+  passFail(live.e, 10_000, 5);
+  live.e.ingest([R('10.000')]);
+  live.e.ingest([OL(), R('12.000'), R('12.000')]);
+  eq(live.e.passFailRows.map((v) => v.id), [0, 1], 'precondition: two verdict rows');
+  const { e } = moveTo(live);
+  passFail(e, 10_000, 5);
+  e.ingest([OL(), R('10.000'), R('10.000')]);
+  eq(e.passFailRows.map((v) => v.id), [0, 1, 2], 'the next captured verdict has a fresh id');
 }
 
 console.log(`check-capture: ${checks} assertions passed`);

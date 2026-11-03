@@ -7,7 +7,7 @@
 // per batch — which is what keeps setState out of the per-sample loop by construction.
 
 import {
-  displayDecimals, normalizeReading, readingResolution, withinStableBand,
+  displayDecimals, lsdOf, normalizeReading, readingResolution, withinStableBand,
   type Mode, type Reading,
 } from './parser.ts';
 import { RETENTION_MS, type SampleStore } from './samples.ts';
@@ -54,6 +54,24 @@ export interface BatchResult {
   currentStable: boolean;
   recordedResolution: number | null;
   dominantValue: number | null;
+}
+
+export interface RestoreInput {
+  mode: string;
+  unit: string;
+  chartFromSeq: number;
+  verdicts: VerdictRow[];
+}
+
+// What the page commits after `restore`, once, as it does `BatchResult` after `ingest`.
+export interface RestoreResult {
+  unit: string;
+  chartFromSeq: number;
+  sessionStart: number | null;
+  stats: SessionStats | null;
+  recordedResolution: number | null;
+  dominantValue: number | null;
+  verdicts: VerdictRow[];
 }
 
 export class CaptureEngine {
@@ -106,6 +124,8 @@ export class CaptureEngine {
   private recordedResolution: number | null = null;
   private dominantValue: number | null = null;
   private dominantCount = 0;
+  // Set by `restore`, spent by the first mode change after it. See `restore`.
+  private restoreGuard = false;
 
   private readonly store: SampleStore;
 
@@ -176,6 +196,7 @@ export class CaptureEngine {
 
   // Full session flush: clear the canonical store AND every derived projection.
   flush(): void {
+    this.restoreGuard = false;
     // `clear()` keeps seq monotonic, so the watermark below lands past every seq ever used
     // and a stale watermark can never sit ahead of new samples.
     this.store.clear();
@@ -190,6 +211,25 @@ export class CaptureEngine {
   // integer: the store is untouched and the chart simply starts reading later. Clearing the
   // store here would take the operator's log with it.
   private resetDerived(): void {
+    this.resetAccumulators();
+    // Next unused seq: everything already stored belongs to the previous unit.
+    this.chartFromSeq = this.store.firstSeq + this.store.count;
+  }
+
+  // The trigger and the Pass/Fail reference typed for the current mode. The page clears its
+  // own copies too, but only on its next render — readings replayed before that must already
+  // see these cleared, or a stale armed trigger flushes a just-restored session.
+  private clearEntryState(): void {
+    this.triggerThreshold = null;
+    this.triggerArmed = false;
+    this.triggerStarted = false;
+    this.pfRefEntry = null;
+    this.pfBandEntry = null;
+    this.pfToleranceValue = null;
+    this.pfLastCaptured = null;
+  }
+
+  private resetAccumulators(): void {
     this.stats = { count: 0, mean: 0, m2: 0, min: Infinity, max: -Infinity };
     this.runAnchor = null;
     this.stableRun = 0;
@@ -198,8 +238,96 @@ export class CaptureEngine {
     this.counts.clear();
     this.dominantValue = null;
     this.dominantCount = 0;
-    // Next unused seq: everything already stored belongs to the previous unit.
-    this.chartFromSeq = this.store.firstSeq + this.store.count;
+  }
+
+  // What a saved session needs to carry besides the samples so `restore` can put the engine
+  // back where the read loop left off.
+  get context(): { mode: string | null; unit: string; chartFromSeq: number } {
+    return { mode: this.mode, unit: this.unit, chartFromSeq: this.chartFromSeq };
+  }
+
+  // Put the engine in the state the read loop would be in had it recorded the loaded store
+  // itself. The store has already been loaded by the caller. Recording stays off.
+  //
+  // The mode/unit assignment is what stops the first packet from taking the mode-change branch
+  // and flushing the restored rows (a fresh page has `mode === null`; see gotchas.md). The
+  // guard covers the other way in: restoring a resistance session while the meter shows voltage
+  // makes the first reading a REAL mode change.
+  restore(s: RestoreInput): RestoreResult {
+    const store = this.store;
+    this.mode = s.mode;
+    this.unit = s.unit;
+    this.setRecording(false);
+    this.clearEntryState();
+    this.resetAccumulators();
+    this.chartFromSeq = s.chartFromSeq;
+    this.restoreGuard = true;
+    this.passFailRows = s.verdicts;
+    // `VerdictRow.id` is a React key: the next captured row must not collide with a restored one.
+    this.pfRowId = s.verdicts.reduce((next, v) => Math.max(next, v.id + 1), 0);
+
+    // Same order as `ingest`, with the LSD it would have computed: the stored decimals and wire
+    // unit are exactly `readingResolution`'s inputs. Only rows at or after the watermark
+    // count — earlier ones belong to a unit the statistics and histogram do not mix.
+    for (let i = Math.max(0, s.chartFromSeq - store.firstSeq); i < store.count; i++) {
+      const unit = store.unitAt(i);
+      const lsd = unit === '' ? null : lsdOf(store.decimalsAt(i), unit);
+      this.accumulate(store.valueAt(i), lsd);
+    }
+    return {
+      unit: s.unit,
+      chartFromSeq: s.chartFromSeq,
+      sessionStart: this.sessionStart(),
+      stats: this.stats.count > 0 ? { ...this.stats } : null,
+      recordedResolution: this.recordedResolution,
+      dominantValue: this.dominantValue,
+      verdicts: s.verdicts,
+    };
+  }
+
+  // The chart's x-axis anchor: the oldest sample the chart can actually see, read from the
+  // store against the FINAL watermark rather than tracked during a batch. Stating it as a
+  // derivation instead of a running candidate is what makes it immune to a mid-batch watermark
+  // advance — the preserve-log mode change flushes old-unit samples and THEN advances, so
+  // anything captured before that advance is the previous unit.
+  private sessionStart(): number | null {
+    const anchorIdx = Math.max(0, this.chartFromSeq - this.store.firstSeq);
+    return this.store.count > anchorIdx ? this.store.tsAt(anchorIdx) : null;
+  }
+
+  // Retention, applied to the ONE store: past seven days the oldest samples leave the table and
+  // the CSV too, not just the chart. Measured back from the newest sample, not the clock: a
+  // restored session older than the window stays whole (for its CSV) until recording adds a
+  // sample, instead of vanishing at the first reading.
+  private trimToWindow(): boolean {
+    const n = this.store.count;
+    return n > 0 && this.store.trim(this.store.tsAt(n - 1) - RETENTION_MS);
+  }
+
+  // The per-sample accumulation for one recorded value: histogram counts and the dominant
+  // value that centres its window, the coarsest LSD (bin width + stat decimals reflect the
+  // recorded data, range-robust to auto-ranging) and the Welford statistics. One method, not
+  // two copies, because `restore` replays it over stored rows and must agree with the live
+  // path exactly. No clamping: the operator's y-range is applied when the chart draws, so
+  // changing it re-clamps the whole session instead of only what arrives next.
+  private accumulate(baseValue: number, lsd: number | null): void {
+    if (lsd !== null) {
+      const k = Math.round(baseValue / lsd) * lsd;
+      const c = (this.counts.get(k) ?? 0) + 1;
+      this.counts.set(k, c);
+      if (c > this.dominantCount) {
+        this.dominantCount = c;
+        this.dominantValue = k;
+      }
+      this.recordedResolution = Math.max(this.recordedResolution ?? 0, lsd);
+    }
+    const s = this.stats;
+    s.count += 1;
+    const delta = baseValue - s.mean;
+    s.mean += delta / s.count;
+    s.m2 += delta * (baseValue - s.mean);
+    if (baseValue < s.min) s.min = baseValue;
+    if (baseValue > s.max) s.max = baseValue;
   }
 
   ingest(readings: Reading[]): BatchResult {
@@ -252,51 +380,40 @@ export class CaptureEngine {
 
       if (baseUnit !== '' && (this.mode !== r.mode || this.unit !== baseUnit)) {
         const wasInitialized = this.mode !== null;
+        // A restore keeps the log through a change at its first reading, whatever the setting says.
+        const keepLog = this.preserveOnModeChange || this.restoreGuard;
         this.mode = r.mode;
         this.unit = baseUnit;
         unitChanged = baseUnit;
         // Keep the recorded log across a real mode change if opted in (chart/stats are
         // single-unit and always reset). The first detection has no prior data, so a
         // full flush is equivalent. Old-unit rows stay valid in their original unit.
-        if (wasInitialized && this.preserveOnModeChange) {
+        if (wasInitialized && keepLog) {
           // Samples staged before the change are old-unit rows the operator asked to keep.
           // They must reach the store BEFORE the watermark advances, or the watermark
           // lands behind them and the chart draws the previous unit.
           flushStaged();
           this.resetDerived();
-          reset = true;
-          appended = 0;
         } else {
           staged.length = 0;
           this.flush();
-          reset = true;
           touched = true;
-          appended = 0;
         }
-        // A real mode/unit change makes the in-progress data and threshold
-        // meaningless in the new unit — stop logging, then reset the trigger
-        // (clear threshold + disarm). (Skip on the first reading, which is
-        // initial detection, not a change, so a pre-typed threshold survives.)
+        reset = true;
+        appended = 0;
+        // A real mode/unit change makes the in-progress data, threshold and reference
+        // meaningless in the new unit — stop logging and clear them. (Skip on the first
+        // reading, which is initial detection, not a change, so a pre-typed threshold
+        // survives.) The captured verdicts follow "Keep log on mode change" like the Data
+        // Log does: each row carries its own mode, so a kept batch stays valid.
         if (wasInitialized) {
-          if (this.recording) {
-            this.recording = false;
-            recordingChanged = true;
-          }
-          this.triggerThreshold = null;
-          this.triggerArmed = false;
-          this.triggerStarted = false;
+          recordingChanged ||= this.recording;
+          this.recording = false;
+          this.clearEntryState();
           armed = false;
           threshold = null;
           release = null;
-          // The reference belongs to the old mode's unit and is meaningless in the new one —
-          // cleared for the same reason the trigger threshold is. The captured verdicts
-          // follow "Keep log on mode change" like the Data Log does: each row carries its own
-          // mode, so a kept batch stays valid in its original unit.
-          this.pfRefEntry = null;
-          this.pfBandEntry = null;
-          this.pfToleranceValue = null;
-          this.pfLastCaptured = null;
-          if (!this.preserveOnModeChange) {
+          if (!keepLog) {
             this.passFailRows = [];
             this.pfRowId = 0;
             newVerdicts.length = 0;
@@ -305,6 +422,9 @@ export class CaptureEngine {
           modeReset = true;
         }
       }
+      // Spent by the first reading with a unit, changed or not, so a mode change hours after the
+      // restore follows the setting like any other.
+      this.restoreGuard &&= baseUnit === '';
 
       // Trigger edges (evaluated before recording so the crossing sample is captured).
       const mag = baseValue !== null ? Math.abs(baseValue) : null;
@@ -424,28 +544,13 @@ export class CaptureEngine {
           }
 
           if (logSample) {
-            // Readings per LSD-snapped value: the histogram's bars and the dominant value
-            // that centres its window. INSIDE the `logSample` gate, with everything else.
-            //
-            // It sat outside once, counting every reading regardless of the filter. That
-            // made the histogram grow three times a second while the Samples tile stayed
-            // at the number of recorded entries — two readouts of the same session
-            // disagreeing by orders of magnitude. The filter is a gate: a reading it
-            // rejects is not recorded anywhere, and that has to include here.
-            if (lsd !== null) {
-              const k = Math.round(baseValue / lsd) * lsd;
-              const c = (this.counts.get(k) ?? 0) + 1;
-              this.counts.set(k, c);
-              if (c > this.dominantCount) {
-                this.dominantCount = c;
-                this.dominantValue = k;
-              }
-            }
-            // Everything in this block is behind the same gate, deliberately: the store,
-            // the histogram counts, the recorded resolution and the statistics. Hoisting
-            // any of it to the `recording` level one scope out would silently disable
-            // "Stable values only" for that consumer — no compile error, and no visible
-            // symptom until two readouts of the same session disagree.
+            // Everything recorded is behind this one gate, deliberately: the store, the
+            // histogram counts, the recorded resolution and the statistics. The counts sat
+            // outside it once, counting every reading regardless of the filter, so the
+            // histogram grew three times a second while the Samples tile stayed at the number
+            // of recorded entries — two readouts of the same session disagreeing by orders
+            // of magnitude. Hoisting any of it to the `recording` level one scope out would
+            // silently disable "Stable values only" for that consumer.
             staged.push({
               ts: r.ts,
               value: baseValue,
@@ -454,20 +559,7 @@ export class CaptureEngine {
               decimals: displayDecimals(r.display),
             });
             touched = true;
-            // Track the coarsest LSD among logged readings → bin width + stat
-            // decimals reflect the recorded data, range-robust to auto-ranging.
-            if (lsd !== null) {
-              this.recordedResolution = Math.max(this.recordedResolution ?? 0, lsd);
-            }
-            const s = this.stats;
-            s.count += 1;
-            const delta = baseValue - s.mean;
-            s.mean += delta / s.count;
-            s.m2 += delta * (baseValue - s.mean);
-            if (baseValue < s.min) s.min = baseValue;
-            if (baseValue > s.max) s.max = baseValue;
-            // No clamping here. The operator's y-range is applied when the chart draws, so
-            // changing it re-clamps the whole session instead of only what arrives next.
+            this.accumulate(baseValue, lsd);
           }
         }
       }
@@ -476,19 +568,9 @@ export class CaptureEngine {
     // ---- Once per batch, never in the per-sample loop ------------------------
     flushStaged();
 
-    // Retention, applied to the ONE store: past seven days the oldest samples leave the
-    // table and the CSV too, not just the chart. A dropped chunk invalidates the chart's
-    // incremental tier, which is what `chartEpoch` tells it.
-    const trimmed = store.trim(Date.now() - RETENTION_MS);
+    // A dropped chunk invalidates the chart's incremental tier, which is what `chartEpoch` tells it.
+    const trimmed = this.trimToWindow();
     if (trimmed) touched = true;
-
-    // The chart's x-axis anchor: the oldest sample the chart can actually see, read from
-    // the store against the FINAL watermark rather than tracked during the batch. Stating
-    // it as a derivation instead of a running candidate is what makes it immune to a
-    // mid-batch watermark advance — the preserve-log mode change flushes old-unit samples
-    // and THEN advances, so anything captured before that advance is the previous unit.
-    const anchorIdx = Math.max(0, this.chartFromSeq - store.firstSeq);
-    const sessionStart = store.count > anchorIdx ? store.tsAt(anchorIdx) : null;
 
     // Same batched append for the Pass/Fail store.
     if (newVerdicts.length > 0) {
@@ -502,7 +584,7 @@ export class CaptureEngine {
       reset,
       touched,
       trimmed,
-      sessionStart,
+      sessionStart: this.sessionStart(),
       // Only when something was actually logged: stats mutates inside `if (logSample)`,
       // so with the stable filter on most batches change nothing and a fresh object identity
       // would re-render StatisticsPanel three times a second for nothing.

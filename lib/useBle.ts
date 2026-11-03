@@ -150,5 +150,14 @@ export function useBle(onReadings: (readings: Reading[]) => void) {
 
   useEffect(() => end, [end]);
 
+  // A connected client keeps the module awake and stops it advertising to anyone else. Chrome
+  // drops the link when it destroys the page, but that waits on teardown and never happens for
+  // a page kept in the back/forward cache, so release it explicitly as the page goes away.
+  // `pagehide`, not `beforeunload`: it fires only once leaving is certain, and keeps bfcache.
+  useEffect(() => {
+    window.addEventListener('pagehide', disconnect);
+    return () => window.removeEventListener('pagehide', disconnect);
+  }, [disconnect]);
+
   return { status, error, connect, disconnect, clearError, deviceName };
 }

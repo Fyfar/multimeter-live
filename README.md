@@ -23,6 +23,9 @@ account, no backend. Your data never leaves your machine.
 - **Pass/Fail sorting.** Set a reference and tolerance, touch parts one after another, and
   hear the verdict: pass and fail tones are distinct enough to sort a tray of resistors
   without looking at the screen. Verdicts export to their own CSV.
+- **Survives a reload, a crash or a browser restart.** The session, its notes and Pass/Fail
+  verdicts are saved in your browser every few seconds while you record; when you come back,
+  one click restores it. A week-long log comes back in under a second.
 - **Smart capture.** Record only stable values, or let a trigger threshold start and stop
   recording for you.
 - **USB or Bluetooth.** Use a USB-UART adapter, or go wireless with a BLE serial module
@@ -53,8 +56,14 @@ served over `https://` or `localhost`; the hosted app already is.
 
 ## Good to know
 
-- **Recorded data lives in the open tab.** A reload brings back the connection, not the
-  data, so export a CSV before you close it.
+- **A saved session is never reopened by itself.** A reload brings back the connection and
+  an empty session, with a banner offering Restore, Later or Discard. A crash loses at most
+  the last few seconds (up to about 20 s if the tab was in the background). One previous
+  session is kept, and a newer one replaces it; Clear Data deletes the saved copy too.
+- **Saving is per browser, one tab at a time.** A second tab saves nothing until the first
+  one closes, and the header says so. A private window forgets the session when it closes,
+  and clearing site data deletes it. The saved copy is a safety net, not an archive: export
+  a CSV for anything you need to keep.
 - **AC vs DC and frequency are not sent by the meter** over its serial output, so readings
   show as plain "Voltage" and "Current". Check AC/DC on the meter itself.
 - **Pass/Fail covers resistance, diode and capacitance.** A dead short reads as "no part",

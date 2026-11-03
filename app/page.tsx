@@ -13,17 +13,20 @@ import { Settings } from '@/components/Settings';
 import { NoDataWarning } from '@/components/NoDataWarning';
 import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { PassFail } from '@/components/PassFail';
+import { SaveIndicator, SessionConfirm, SessionNotices } from '@/components/SessionNotices';
 import {
   SCALE, displayUnit, normalizeReading, readingResolution, type Reading,
 } from '@/lib/parser';
 import { SampleStore } from '@/lib/samples';
-import { CaptureEngine, type SessionStats } from '@/lib/capture';
+import { CaptureEngine, type RestoreResult, type SessionStats } from '@/lib/capture';
 import {
   VERDICT_CSV_HEADER, isSupportedMode, parseEntry, verdictCsvLine,
   type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
 import { useSerial } from '@/lib/useSerial';
 import { useBle } from '@/lib/useBle';
+import { useSessionPersistence } from '@/lib/useSessionPersistence';
+import { SessionPersister, type SaveStatus } from '@/lib/sessionPersister';
 import { isBusy, type ConnectionStatus, type Transport } from '@/lib/connection';
 import {
   DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings as SettingValues,
@@ -95,8 +98,8 @@ function unlessBusy(other: ConnectionStatus, clearOther: () => void, connect: ()
   void connect();
 }
 
-function AppHeader({ status, detail, theme, onToggleTheme, connectionOpen, onOpenConnection }: {
-  status: ConnectionStatus; detail: string; theme: Theme; onToggleTheme: () => void;
+function AppHeader({ status, detail, saveStatus, theme, onToggleTheme, connectionOpen, onOpenConnection }: {
+  status: ConnectionStatus; detail: string; saveStatus: SaveStatus; theme: Theme; onToggleTheme: () => void;
   connectionOpen: boolean; onOpenConnection: () => void;
 }) {
   const connected = status === 'connected';
@@ -136,7 +139,8 @@ function AppHeader({ status, detail, theme, onToggleTheme, connectionOpen, onOpe
       </button>
 
       {/* Actions */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3">
+        <SaveIndicator status={saveStatus} />
         <button
           onClick={onToggleTheme}
           aria-label={themeWord}
@@ -253,6 +257,10 @@ export default function Home() {
   const [engine] = useState<CaptureEngine>(() => new CaptureEngine(store));
   const [sessionStats, setSessionStats] = useState<SessionStats | null>(null);
 
+  // The durable copy of the session; see lib/sessionPersister.ts. Reads from the engine and store
+  // behind the scenes — the page only feeds it `tick`/dirty marks and drives Restore/Discard.
+  const [persister] = useState<SessionPersister>(() => new SessionPersister(store, engine));
+
   const verdictAudioRef = useRef(verdictAudio);
   // One beeper for the component's life; created client-side, disposed on unmount.
   // Declared here rather than beside its effect because handleReadings (defined below)
@@ -331,25 +339,11 @@ export default function Home() {
     };
   }, []);
 
-  // Guard an unload that would discard the session. Registered ONLY while there is
-  // something to lose: a permanently-registered beforeunload handler is a signal to the
-  // browser in its own right (bfcache eligibility, PWA install heuristics), so an idle app
-  // must not carry one. This also covers the service worker's Reload button, which goes
-  // through window.location.reload() and is this app's most likely cause of session loss.
-  // The store is mutated in place, so `sampleVersion` is what re-renders this component;
-  // the reads themselves are plain and re-evaluate on every render.
+  // The store is mutated in place, so `sampleVersion` is what re-renders this component; the
+  // reads themselves are plain and re-evaluate on every render.
   void sampleVersion;
   const sampleCount = store.count;
   const hasRows = sampleCount > 0 || passFailRows.length > 0;
-  useEffect(() => {
-    if (!hasRows) return;
-    const warn = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = ''; // older browsers still gate the dialog on this
-    };
-    window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
-  }, [hasRows]);
 
   // Navigation is presentational only: it never touches logging, the trigger, or the port.
   // pushState (not location.hash =) so each view becomes its own history entry AND no
@@ -373,28 +367,34 @@ export default function Home() {
     setDominantValue(null);
   }, [engine]);
 
-  // Full session flush: clear the canonical store AND every derived projection.
-  const flushSession = useCallback(() => {
-    engine.flush();
-    setSampleVersion((v) => v + 1);
-    commitReset();
-  }, [engine, commitReset]);
-
-  // Clear Data / Clear Log only ask; the flush happens on confirm.
+  // Clear Data / Clear Log only ask; the confirm is the full session flush: the canonical store
+  // AND every derived projection.
   const [confirmClear, setConfirmClear] = useState(false);
   const requestClear = useCallback(() => setConfirmClear(true), []);
   const cancelClear = useCallback(() => setConfirmClear(false), []);
   const confirmFlush = useCallback(() => {
-    flushSession();
+    engine.flush();
+    setSampleVersion((v) => v + 1);
+    commitReset();
+    persister.requestFlush(); // the saved copy goes now, not at the next 5 s tick
     setConfirmClear(false);
-  }, [flushSession]);
+  }, [engine, commitReset, persister]);
 
-  const handleReadings = useCallback(
+  // The operator-typed trigger and Pass/Fail entry belong to the live session's mode: cleared on
+  // a mode change and on a restore.
+  const resetEntryFields = useCallback(() => {
+    setTriggerThreshold('');
+    setTriggerArmed(false);
+    setPfReference('');
+    setPfTolerance('');
+    setPfReferenceSettled('');
+    setPfToleranceSettled('');
+  }, []);
+
+  // Everything one batch changes in React state, committed once. Separate from `handleReadings` so
+  // a restore can hold batches and replay them here afterwards.
+  const ingestBatch = useCallback(
     (readings: Reading[]) => {
-      // Mark data as flowing — resets the no-data detector's silence clock.
-      lastDataAtRef.current = Date.now();
-      setCurrent(readings[readings.length - 1]);
-
       const r = engine.ingest(readings);
 
       // Order matters: a reset's nulls must land before this batch's stats and session-start
@@ -406,14 +406,7 @@ export default function Home() {
         setChartUnit(displayUnit(r.unit));
         setChartBaseUnit(r.unit);
       }
-      if (r.modeReset) {
-        setTriggerThreshold('');
-        setTriggerArmed(false);
-        setPfReference('');
-        setPfTolerance('');
-        setPfReferenceSettled('');
-        setPfToleranceSettled('');
-      }
+      if (r.modeReset) resetEntryFields();
       if (r.reset) commitReset();
       if (r.trimmed) setChartEpoch((e) => e + 1);
 
@@ -445,8 +438,40 @@ export default function Home() {
       // nothing was logged this batch — e.g. logging stopped → React bails out.)
       setRecordedResolution(r.recordedResolution);
       setDominantValue(r.dominantValue);
+
+      persister.tick(); // cheap; the write itself happens outside this call
     },
-    [engine, commitReset],
+    [engine, commitReset, resetEntryFields, persister],
+  );
+
+  // Everything a restore changed, committed once like a `BatchResult`.
+  const commitRestore = useCallback((res: RestoreResult) => {
+    setSampleVersion((v) => v + 1);
+    setChartFromSeq(res.chartFromSeq);
+    setChartEpoch((e) => e + 1);
+    setSessionStats(res.stats);
+    setSessionStart(res.sessionStart);
+    setRecordedResolution(res.recordedResolution);
+    setDominantValue(res.dominantValue);
+    setChartUnit(displayUnit(res.unit));
+    setChartBaseUnit(res.unit);
+    setPassFailRows(res.verdicts);
+    setRecording(false);
+    resetEntryFields();
+  }, [resetEntryFields]);
+
+  const { status: saveStatus, previous, restore } =
+    useSessionPersistence(persister, hasRows, commitRestore, ingestBatch);
+  const feedReadings = restore.feed;
+
+  const handleReadings = useCallback(
+    (readings: Reading[]) => {
+      // Mark data as flowing — resets the no-data detector's silence clock.
+      lastDataAtRef.current = Date.now();
+      setCurrent(readings[readings.length - 1]);
+      feedReadings(readings);
+    },
+    [feedReadings],
   );
 
   const serial = useSerial(handleReadings);
@@ -505,7 +530,8 @@ export default function Home() {
   const clearPassFail = useCallback(() => {
     engine.clearVerdicts();
     setPassFailRows(engine.passFailRows);
-  }, [engine]);
+    persister.requestFlush();
+  }, [engine, persister]);
 
   const { connect: serialConnect, clearError: clearSerialError } = serial;
   const { connect: bleConnect, clearError: clearBleError } = ble;
@@ -535,8 +561,9 @@ export default function Home() {
   // that never updates.
   const handleNoteChange = useCallback((seq: number, note: string) => {
     store.setNote(seq, note);
+    persister.markNotesDirty();
     setSampleVersion((v) => v + 1);
-  }, [store]);
+  }, [store, persister]);
 
   // Serializes the same canonical store the Data Log renders and the chart draws. Numeric
   // only (OL is excluded upstream), so every stored value is a real measurement.
@@ -620,10 +647,23 @@ export default function Home() {
       <AppHeader
         status={status}
         detail={detail}
+        saveStatus={saveStatus}
         theme={theme}
         onToggleTheme={toggleTheme}
         connectionOpen={sheet === 'connection'}
         onOpenConnection={() => setSheet('connection')}
+      />
+
+      <SessionNotices
+        previous={previous}
+        deferred={restore.deferred}
+        status={saveStatus}
+        restoring={restore.restoring}
+        restoreError={restore.error}
+        onRestore={restore.request}
+        onLater={restore.defer}
+        onDiscard={restore.discard}
+        onDismissError={restore.dismissError}
       />
 
       {/* ── Body ── */}
@@ -645,7 +685,7 @@ export default function Home() {
         {view === 'dashboard' ? (
           <>
             {/* Main content */}
-            <main className="min-w-0 flex-1 overflow-y-auto p-5">
+            <main tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto p-5 focus:outline-none">
               <div className="flex flex-col gap-4">
                 <DigitalDisplay
                   reading={current}
@@ -763,8 +803,8 @@ export default function Home() {
             <p>
               This permanently removes{' '}
               <strong className="text-fg">{sampleCount.toLocaleString()} recorded samples</strong>{' '}
-              from the chart, statistics and Data Log. It cannot be undone. Export a CSV first
-              if you need them.
+              from the chart, statistics and Data Log, and deletes their saved copy. It cannot be
+              recovered. Export a CSV first if you need them.
             </p>
           }
           confirmLabel="Clear data"
@@ -772,6 +812,14 @@ export default function Home() {
           onCancel={cancelClear}
         />
       )}
+      <SessionConfirm
+        pending={restore.pending}
+        previous={previous}
+        samples={sampleCount}
+        verdictRows={passFailRows.length}
+        onConfirm={restore.confirm}
+        onCancel={restore.cancel}
+      />
     </div>
   );
 }

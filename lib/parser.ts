@@ -174,10 +174,13 @@ export function resolutionDecimals(width: number): number {
  */
 export function readingResolution(r: Reading): number | null {
   if (!r.unit || r.value === null) return null;
-  const lsdDisplay = Math.pow(10, -displayDecimals(r.display));
-  const factor = SCALE[r.unit]?.factor ?? 1;
-  return lsdDisplay * factor;
+  return lsdOf(displayDecimals(r.display), r.unit);
 }
+
+// One step of the last displayed digit, in base units. Shared with `CaptureEngine.restore`,
+// which rebuilds the histogram from stored decimals and must agree with the live path exactly.
+export const lsdOf = (decimals: number, unit: string): number =>
+  Math.pow(10, -decimals) * (SCALE[unit]?.factor ?? 1);
 
 /**
  * Band half-width, in least-significant digits, within which a reading still counts as

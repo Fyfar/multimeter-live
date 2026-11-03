@@ -145,7 +145,7 @@ export function Settings({
     noDataAudio, verdictAudio,
   } = settings;
   return (
-    <main className="min-w-0 flex-1 overflow-y-auto p-5">
+    <main tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto p-5 focus:outline-none">
       <div className="mx-auto max-w-2xl">
         <h2 className="mb-1 text-lg font-semibold text-fg">Settings</h2>
         <p className="mb-5 text-xs text-muted">
