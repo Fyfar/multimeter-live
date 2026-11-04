@@ -10,7 +10,7 @@ import { useUnloadGuard } from './useUnloadGuard';
 /**
  * The page's whole saved-session wiring: starts the persister on mount, exposes its status,
  * guards unload while there are rows, and runs the Restore flow (`commit`/`ingest`: see
- * `useRestoreFlow`). `status` and `previous` change at flush rate, never per sample, so reading
+ * `useRestoreFlow`). `status`, `previous` and `historyRev` change at flush rate, never per sample, so reading
  * them does not put the hot path back into render.
  */
 export function useSessionPersistence(

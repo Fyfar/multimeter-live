@@ -3,12 +3,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import { MODE_LABELS, type Mode } from '@/lib/parser';
-import type { PreviousSession, SaveStatus } from '@/lib/sessionPersister';
+import type { SessionSummary } from '@/lib/persist';
+import type { SaveStatus } from '@/lib/sessionPersister';
 import type { PendingConfirm } from '@/lib/useRestoreFlow';
 import { ConfirmDialog } from './ConfirmDialog';
 
 // A stored mode is a string; an unknown one (newer app version) shows as stored.
-const modeLabel = (m: string): string => MODE_LABELS[m as Mode] ?? m;
+export const modeLabel = (m: string): string => MODE_LABELS[m as Mode] ?? m;
+
+/** Names a kept session in dialogs and accessible names. */
+export const sessionName = (s: SessionSummary): string =>
+  `the session from ${new Date(s.startTs).toLocaleString()} (${s.count.toLocaleString()} samples)`;
 
 const ago = (ms: number): string => {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -51,19 +56,19 @@ const BUTTON = 'rounded-md border px-3 py-1 text-xs font-medium transition-color
 export function SessionNotices({
   previous, deferred, status, restoring, restoreError, onRestore, onLater, onDiscard, onDismissError,
 }: {
-  previous: PreviousSession | null;
+  previous: SessionSummary | null;
   deferred: boolean;
   status: SaveStatus;
   restoring: boolean;
   restoreError: string | null;
-  onRestore: () => void;
+  onRestore: (s: SessionSummary) => void;
   onLater: () => void;
   onDiscard: () => void;
   onDismissError: () => void;
 }) {
   const otherTab = status.kind === 'other-tab';
   const offer = deferred ? null : previous;
-  // The offer's buttons unmount with it (Restore, Later, a confirmed Discard), which drops
+  // The offer's buttons unmount with it (Restore, Later, Discard), which drops
   // keyboard focus to <body>; hand it to the visible view instead.
   const offered = useRef(false);
   useEffect(() => {
@@ -81,10 +86,10 @@ export function SessionNotices({
           <p className="min-w-0 flex-1 text-muted">
             <strong className="text-fg">Previous session saved:</strong>{' '}
             {offer.count.toLocaleString()} samples{offer.mode && ` in ${modeLabel(offer.mode)}`}, last recorded{' '}
-            {new Date(offer.lastTs).toLocaleString()}. A newer session replaces it.
+            {new Date(offer.lastTs).toLocaleString()}. Discard keeps it in History.
           </p>
           <div className="flex gap-2">
-            <button onClick={onRestore} disabled={restoring}
+            <button onClick={() => onRestore(offer)} disabled={restoring}
               className={clsx(BUTTON, 'border-accent bg-accent text-white hover:brightness-110 disabled:opacity-60')}>
               {restoring ? 'Restoring…' : 'Restore'}
             </button>
@@ -102,8 +107,7 @@ export function SessionNotices({
       {restoreError && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
           <p role="alert" className="min-w-0 flex-1 text-amber">
-            The previous session could not be restored: {restoreError}. It is still saved;
-            Discard removes it.
+            The session could not be restored: {restoreError}. It is still kept in History.
           </p>
           <button onClick={onDismissError} className={clsx(BUTTON, 'border-border bg-surface text-fg hover:brightness-110')}>
             OK
@@ -120,55 +124,42 @@ export function SessionNotices({
   );
 }
 
-// Restore asks first when it replaces a live session or the meter is in another mode; Discard
-// always asks, since it deletes what may be days of data.
-export function SessionConfirm({ pending, previous, samples, verdictRows, onConfirm, onCancel }: {
+// Restore asks first when it replaces a live session or the meter is in another mode. `keep`:
+// whether ending the live session now would keep it in History.
+export function SessionConfirm({ pending, samples, verdictRows, keep, onConfirm, onCancel }: {
   pending: PendingConfirm;
-  previous: PreviousSession | null;
   samples: number;
   verdictRows: number;
+  keep: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  if (pending === null || previous === null) return null;
-  if (pending.kind === 'discard') {
-    return (
-      <ConfirmDialog
-        title="Discard the previous session?"
-        body={
-          <p>
-            This deletes the saved{' '}
-            <strong className="text-fg">{previous.count.toLocaleString()} samples</strong>, last
-            recorded {new Date(previous.lastTs).toLocaleString()}. They cannot be recovered.
-          </p>
-        }
-        confirmLabel="Discard"
-        onConfirm={onConfirm}
-        onCancel={onCancel}
-      />
-    );
-  }
+  if (pending === null) return null;
   const replaces = samples > 0 || verdictRows > 0;
-  const { otherMode } = pending;
+  const { target, otherMode } = pending;
   return (
     <ConfirmDialog
       title={replaces ? 'Replace the current session?' : 'Restore in another mode?'}
       body={
         <>
+          <p>
+            Restore {sessionName(target)}, last recorded {new Date(target.lastTs).toLocaleString()}.
+          </p>
           {replaces && (
-            <p>
+            <p className="mt-3">
               The current session holds{' '}
               <strong className="text-fg">{samples.toLocaleString()} recorded samples</strong>
-              {verdictRows > 0 && ` and ${verdictRows} Pass/Fail rows`}. Restoring the previous
-              session replaces them, and they cannot be recovered. Export a CSV first if you need
-              them.
+              {verdictRows > 0 && ` and ${verdictRows} Pass/Fail rows`}.{' '}
+              {keep
+                ? 'Restoring replaces them; they move to History.'
+                : 'Restoring replaces them; they will not be kept and cannot be recovered. Export a CSV first if you need them.'}
             </p>
           )}
-          {otherMode !== null && previous.mode !== null && (
-            <p className={clsx(replaces && 'mt-3')}>
+          {otherMode !== null && target.mode !== null && (
+            <p className="mt-3">
               The meter is in <strong className="text-fg">{modeLabel(otherMode)}</strong>, but the
               saved session was recorded in{' '}
-              <strong className="text-fg">{modeLabel(previous.mode)}</strong>. Its rows stay in
+              <strong className="text-fg">{modeLabel(target.mode)}</strong>. Its rows stay in
               the Data Log and the CSV, but the chart and statistics start empty from the next
               reading.
             </p>
@@ -176,6 +167,35 @@ export function SessionConfirm({ pending, previous, samples, verdictRows, onConf
         </>
       }
       confirmLabel="Restore"
+      onConfirm={onConfirm}
+      onCancel={onCancel}
+    />
+  );
+}
+
+// Clear Data and Clear Log share it. Promises History only when the session will really be kept.
+export function ClearConfirm({ samples, keep, onConfirm, onCancel }: {
+  samples: number;
+  keep: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const n = <strong className="text-fg">{samples.toLocaleString()} recorded samples</strong>;
+  return (
+    <ConfirmDialog
+      title="Clear all recorded data?"
+      body={keep ? (
+        <p>
+          This clears {n} from the chart, statistics and Data Log. They move to History, where
+          you can restore or export them.
+        </p>
+      ) : (
+        <p>
+          This removes {n} from the chart, statistics and Data Log. They will not be kept and
+          cannot be recovered. Export a CSV first if you need them.
+        </p>
+      )}
+      confirmLabel="Clear data"
       onConfirm={onConfirm}
       onCancel={onCancel}
     />

@@ -17,7 +17,11 @@ const SEGMENT = 256;
 /** Bump on an incompatible layout change; `assembleSession` refuses anything else. */
 const SCHEMA_VERSION = 1;
 
-export type SessionState = 'active' | 'previous';
+// `previous` is the one session the restore notice offers; `closed` is the rest of History.
+export type SessionState = 'active' | 'previous' | 'closed';
+
+const MIN_SAMPLES = 30;
+export const HISTORY_MAX_AGE_MS = 30 * 86_400_000;
 
 export interface SessionSummary {
   id: number;
@@ -39,7 +43,19 @@ export interface SessionSummary {
   // at 13 would restore the wrong unit without any error.
   modes: string[];
   units: string[];
+  // Absent in summaries written by 2.4.0.
+  verdicts?: number;
+  notes?: number;
 }
+
+type Counts = Pick<SessionSummary, 'count' | 'verdicts' | 'notes'>;
+
+/**
+ * Whether an ended session is worth keeping in History. A summary without counts (2.4.0) is
+ * kept: a Pass/Fail-only session has no samples, and zero would delete it.
+ */
+export const isKeepable = (s: Counts): boolean =>
+  s.verdicts === undefined || s.notes === undefined || s.count >= MIN_SAMPLES || s.verdicts > 0 || s.notes > 0;
 
 export interface FlushView {
   now: number;
@@ -49,6 +65,9 @@ export interface FlushView {
   firstTs: number | null;
   lastTs: number | null;
   verdictRows: number;
+  notes: number;
+  // Above every session id this page has seen: a clock set back must not reuse a kept one's.
+  minId: number;
   mode: string | null;
   unit: string;
   chartFromSeq: number;
@@ -65,8 +84,10 @@ export interface FlushMark {
 }
 
 export interface FlushPlan {
-  // Delete this whole session first (its samples, notes and verdicts): the store was cleared.
+  // The session ended. Kept: its last summary is rewritten as `closed`. Not kept: it is deleted
+  // whole, first. Never both for one id, since removals run first in the transaction.
   removeSession: number | null;
+  closeSummary: SessionSummary | null;
   // Null when nothing is left to save.
   summary: SessionSummary | null;
   segments: { seq: number; n: number }[];
@@ -83,6 +104,8 @@ const matchesStorage = (cont: SessionSummary, view: FlushView, endSeq: number): 
   cont.unit === view.unit &&
   cont.chartFromSeq === view.chartFromSeq &&
   cont.units.length === view.units.length &&
+  cont.verdicts === view.verdictRows &&
+  cont.notes === view.notes &&
   !view.notesDirty &&
   !view.verdictsDirty;
 
@@ -95,14 +118,13 @@ function resumeSeq(cont: SessionSummary | null, view: FlushView, endSeq: number,
   return Math.max(view.firstSeq, aligned);
 }
 
-function summaryFor(
-  view: FlushView, cont: SessionSummary | null, last: FlushMark | null, endSeq: number, origin: number,
-): SessionSummary {
+function summaryFor(view: FlushView, cont: SessionSummary | null, endSeq: number, origin: number): SessionSummary {
   return {
-    id: cont !== null ? cont.id : Math.max(view.now, (last?.summary.id ?? 0) + 1),
+    id: cont !== null ? cont.id : Math.max(view.now, view.minId),
     state: 'active',
     startTs: cont !== null ? cont.startTs : (view.firstTs ?? view.now),
-    lastTs: view.lastTs ?? cont?.lastTs ?? view.now,
+    // Rewritten only on a change, so a session without samples ages from its last change.
+    lastTs: view.lastTs ?? view.now,
     count: view.count,
     firstSeq: view.firstSeq,
     endSeq,
@@ -113,6 +135,8 @@ function summaryFor(
     schemaVersion: SCHEMA_VERSION,
     modes: view.modes,
     units: view.units,
+    verdicts: view.verdictRows,
+    notes: view.notes,
   };
 }
 
@@ -121,9 +145,21 @@ function summaryFor(
 const gridOrigin = (cont: SessionSummary | null, view: FlushView): number =>
   cont !== null && (view.firstSeq - cont.gridOrigin) % SEGMENT === 0 ? cont.gridOrigin : view.firstSeq;
 
-const endPlan = (removeSession: number): FlushPlan => ({
-  removeSession, summary: null, segments: [], deleteBelow: null, writeNotes: false, writeVerdicts: false,
+type End = Pick<FlushPlan, 'removeSession' | 'closeSummary'>;
+const NO_END: End = { removeSession: null, closeSummary: null };
+
+const endPlan = (end: End): FlushPlan => ({
+  ...end, summary: null, segments: [], deleteBelow: null, writeNotes: false, writeVerdicts: false,
 });
+
+/**
+ * How a session that ends leaves storage: closed into History if it is worth keeping, else
+ * deleted. `endSeq` is rebuilt because an adopted mark may carry -1.
+ */
+export const endSession = (s: SessionSummary): End =>
+  isKeepable(s)
+    ? { removeSession: null, closeSummary: { ...s, state: 'closed', endSeq: s.firstSeq + s.count } }
+    : { removeSession: s.id, closeSummary: null };
 
 function segmentRanges(from: number, endSeq: number): FlushPlan['segments'] {
   const out: FlushPlan['segments'] = [];
@@ -131,24 +167,31 @@ function segmentRanges(from: number, endSeq: number): FlushPlan['segments'] {
   return out;
 }
 
+// A generation change (Clear, a mode change without keep-log, a trigger) ends the session. An
+// emptying without one (Clear Batch on a verdicts-only session) leaves nothing to keep, and an
+// idle app saves no zero-sample record that a crash would then offer.
+function endOf(last: FlushMark | null, regenerated: boolean, empty: boolean): End {
+  if (last === null) return NO_END;
+  if (regenerated) return endSession(last.summary);
+  return empty ? { removeSession: last.summary.id, closeSummary: null } : NO_END;
+}
+
 /** The one flush to run now, or null when storage already matches. */
 export function planFlush(view: FlushView, last: FlushMark | null): FlushPlan | null {
   const empty = view.count === 0 && view.verdictRows === 0;
-  // An emptied session is ended rather than kept as a zero-sample record, so an idle app
-  // (and a Clear Batch on a session with no samples) leaves nothing to offer after a crash.
-  const ended = last !== null && (view.generation !== last.generation || empty);
-  const removeSession = ended ? last.summary.id : null;
-  const cont = last !== null && !ended ? last.summary : null;
+  const regenerated = last !== null && view.generation !== last.generation;
+  const end = endOf(last, regenerated, empty);
+  if (empty) return end === NO_END ? null : endPlan(end);
+  const cont = regenerated ? null : (last?.summary ?? null);
 
-  if (empty) return removeSession === null ? null : endPlan(removeSession);
   const endSeq = view.firstSeq + view.count;
   if (cont !== null && matchesStorage(cont, view, endSeq)) return null;
 
   const trimmed = cont !== null && view.firstSeq > cont.firstSeq;
   const origin = gridOrigin(cont, view);
   return {
-    removeSession,
-    summary: summaryFor(view, cont, last, endSeq, origin),
+    ...end,
+    summary: summaryFor(view, cont, endSeq, origin),
     segments: segmentRanges(resumeSeq(cont, view, endSeq, origin), endSeq),
     deleteBelow: trimmed ? view.firstSeq : null,
     // A trim makes the store drop notes below `firstSeq`, so the saved ones are stale too.
@@ -167,24 +210,32 @@ export function adoptedMark(prev: SessionSummary, generation: number, rewrite: b
   return { summary: { ...prev, state: 'active', endSeq: rewrite ? -1 : prev.endSeq }, generation };
 }
 
-/**
- * What a page that owns the lock does with the sessions it finds. Whatever a dead page left
- * active becomes THE previous session; every other session is deleted, because with one offer
- * slot a second older one could never be reached.
- */
-export function planLoad(rows: readonly { id: number; state: SessionState }[]): {
-  keep: number | null;
-  relabel: boolean;
+export interface LoadPlan {
+  previous: SessionSummary | null;
+  // Summaries to rewrite with a new state.
+  relabel: SessionSummary[];
   remove: number[];
-} {
-  const active = rows.filter((r) => r.state === 'active');
-  const pool = active.length > 0 ? active : rows;
-  const keep = pool.reduce<{ id: number; state: SessionState } | null>(
-    (best, r) => (best === null || r.id > best.id ? r : best), null);
+  maxId: number;
+}
+
+/**
+ * What a page that owns the lock does with the sessions it finds: expired and too-short ones
+ * go; of those a dead page left behind (`active`) or that were already offered (`previous`), the
+ * newest is offered and the rest join History as `closed`.
+ */
+export function planLoad(rows: readonly SessionSummary[], now: number): LoadPlan {
+  const remove = rows.filter((r) => now - r.lastTs > HISTORY_MAX_AGE_MS || !isKeepable(r));
+  const left = rows.filter((r) => r.state !== 'closed' && !remove.includes(r));
+  const newest = left.reduce<SessionSummary | null>(
+    (best, r) => (best === null || r.lastTs > best.lastTs || (r.lastTs === best.lastTs && r.id > best.id) ? r : best), null);
+  const previous = newest && { ...newest, state: 'previous' as const };
+  const relabel: SessionSummary[] = left.filter((r) => r !== newest).map((r) => ({ ...r, state: 'closed' }));
+  if (previous !== null && newest?.state !== 'previous') relabel.push(previous);
   return {
-    keep: keep?.id ?? null,
-    relabel: keep?.state === 'active',
-    remove: rows.filter((r) => r !== keep).map((r) => r.id),
+    previous,
+    relabel,
+    remove: remove.map((r) => r.id),
+    maxId: rows.reduce((m, r) => Math.max(m, r.id), 0),
   };
 }
 

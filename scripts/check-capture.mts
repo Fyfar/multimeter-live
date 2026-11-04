@@ -239,11 +239,10 @@ const tenKOnView = () => {
   e.setRecording(true, true);
   const r = e.ingest(Array.from({ length: CHUNK + 1 }, (_, i) => rd('RESISTANCE', '1.000', 'KOM', old + i)));
   eq([r.trimmed, store.count], [false, CHUNK + 1], 'old samples alone stay: the window ends at the newest sample');
-  e.setRecording(false);
-  eq(e.ingest([R('1.000')]).trimmed, false, 'readings while not recording add nothing, so trim nothing');
-  e.setRecording(true, true);
   const r2 = e.ingest([R('1.000')]);
   eq([r2.trimmed, r2.touched, store.count], [true, true, 2], 'a sample past the window drops the old chunk');
+  e.setRecording(false);
+  eq(e.ingest([R('1.000')]).trimmed, false, 'readings while not recording add nothing, so trim nothing');
   eq(e.ingest([R('1.000')]).trimmed, false, 'recent samples are not');
 }
 
@@ -358,6 +357,26 @@ const recorded = (n: number) => {
   e.flush();
   e.ingest([rd('VOLTAGE', '1.500', 'V')]);
   eq(store.count, 0, 'a Clear after a restore spends the guard');
+}
+
+// recording into a restored session past the window ends it first; a recent one continues
+{
+  const aged = (days: number) => {
+    const live = fresh();
+    const t0 = Date.now() - days * 86_400_000;
+    live.e.setRecording(true, true);
+    live.e.ingest(Array.from({ length: 5 }, (_, i) => rd('RESISTANCE', '10.000', 'KOM', t0 + i)));
+    return moveTo(live);
+  };
+  const old = aged(10);
+  const gen = old.store.generation;
+  eq([old.e.setRecording(true, true), old.store.count, old.store.generation > gen], [true, 0, true],
+    'a 10-day-old session: Record starts a new, empty session');
+  old.e.ingest([R('10.000')]);
+  eq(old.store.count, 1, 'and records into it');
+  const recent = aged(2);
+  eq([recent.e.setRecording(true, true), recent.store.count], [false, 5], 'a 2-day-old session continues');
+  eq(recent.e.setRecording(false), false, 'stopping never flushes');
 }
 
 // a restore disarms this engine's trigger and Pass/Fail reference itself: readings held during

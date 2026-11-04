@@ -11,11 +11,11 @@ import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { DataLog } from '@/components/DataLog';
 import { Settings } from '@/components/Settings';
 import { NoDataWarning } from '@/components/NoDataWarning';
-import { ConfirmDialog } from '@/components/ConfirmDialog';
 import { PassFail } from '@/components/PassFail';
-import { SaveIndicator, SessionConfirm, SessionNotices } from '@/components/SessionNotices';
+import { History } from '@/components/History';
+import { ClearConfirm, SaveIndicator, SessionConfirm, SessionNotices } from '@/components/SessionNotices';
 import {
-  SCALE, displayUnit, normalizeReading, readingResolution, type Reading,
+  displayUnit, normalizeReading, readingResolution, type Reading,
 } from '@/lib/parser';
 import { SampleStore } from '@/lib/samples';
 import { CaptureEngine, type RestoreResult, type SessionStats } from '@/lib/capture';
@@ -32,8 +32,7 @@ import {
   DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings as SettingValues,
 } from '@/lib/settings';
 import { createBeeper, type Beeper } from '@/lib/beep';
-import { csvBlob, csvEsc } from '@/lib/csv';
-import { createIsoFormatter } from '@/lib/search';
+import { SAMPLE_CSV_HEADER, csvBlob, downloadCsv, sampleCsvLines } from '@/lib/csv';
 // App version — single source of truth is package.json "version". Bump it on every
 // change (see AGENTS.md "Versioning") so the footer reflects what's deployed.
 import { version as APP_VERSION } from '@/package.json';
@@ -42,14 +41,8 @@ import { version as APP_VERSION } from '@/package.json';
 // for this long, the no-data warning condition is active (the ZT703s streams
 // continuously, so 3 s of silence is clearly abnormal — meter off / lead broken).
 const NO_DATA_MS = 3000;
-const downloadCsv = (blob: Blob, name: string) => {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(url);
-};
+// How long Clear waits for the session to be saved complete before clearing anyway.
+const CLEAR_SAVE_MS = 2000;
 // Pass/Fail verdict tones. Far apart in pitch AND length so they're told apart by ear
 // alone — the operator is looking at the parts, not the screen.
 const PASS_TONE = { hz: 1180, ms: 90 };
@@ -63,6 +56,18 @@ const toFinite = (s: string): number | null => {
   const n = Number.parseFloat(s);
   return Number.isFinite(n) ? n : null;
 };
+
+// An inverted manual range (minimum at or above maximum) describes no window at all. Applying it
+// would hand Chart.js `min > max`, which silently renders an empty or upside-down axis — so it is
+// ignored and auto-scaling continues, and Controls says so instead of leaving the operator to
+// wonder why their numbers did nothing.
+function resolveRange(autoScale: boolean, min: string, max: string) {
+  const lo = toFinite(min);
+  const hi = toFinite(max);
+  const rangeInvalid = !autoScale && lo !== null && hi !== null && lo >= hi;
+  const manual = !autoScale && !rangeInvalid;
+  return { rangeInvalid, yMin: manual ? (lo ?? undefined) : undefined, yMax: manual ? (hi ?? undefined) : undefined };
+}
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
   connected: 'Connected',
@@ -267,11 +272,6 @@ export default function Home() {
   // sounds verdict tones through it.
   const beeperRef = useRef<Beeper | null>(null);
 
-  const setRec = useCallback((v: boolean, manual = false) => {
-    engine.setRecording(v, manual);
-    setRecording(v);
-  }, [engine]);
-
   useEffect(() => { engine.setTriggerArmed(triggerArmed); }, [engine, triggerArmed]);
   useEffect(() => { engine.setTriggerThreshold(toFinite(triggerThreshold)); }, [engine, triggerThreshold]);
   useEffect(() => {
@@ -367,18 +367,32 @@ export default function Home() {
     setDominantValue(null);
   }, [engine]);
 
+  // After `engine.flush()` outside `ingest`. The saved copy ends the session now, not at the next
+  // 5 s tick.
+  const commitFlush = useCallback(() => {
+    setSampleVersion((v) => v + 1);
+    commitReset();
+    persister.requestFlush();
+  }, [commitReset, persister]);
+
+  const setRec = useCallback((v: boolean, manual = false) => {
+    if (engine.setRecording(v, manual)) commitFlush();
+    setRecording(v);
+  }, [engine, commitFlush]);
+
   // Clear Data / Clear Log only ask; the confirm is the full session flush: the canonical store
   // AND every derived projection.
   const [confirmClear, setConfirmClear] = useState(false);
   const requestClear = useCallback(() => setConfirmClear(true), []);
   const cancelClear = useCallback(() => setConfirmClear(false), []);
-  const confirmFlush = useCallback(() => {
-    engine.flush();
-    setSampleVersion((v) => v + 1);
-    commitReset();
-    persister.requestFlush(); // the saved copy goes now, not at the next 5 s tick
+  // Saved complete first, so History holds every sample up to the confirmation; bounded, so a
+  // hung storage cannot hang Clear.
+  const confirmFlush = useCallback(async () => {
     setConfirmClear(false);
-  }, [engine, commitReset, persister]);
+    await Promise.race([persister.saveNow(), new Promise((r) => setTimeout(r, CLEAR_SAVE_MS))]);
+    engine.flush();
+    commitFlush();
+  }, [engine, persister, commitFlush]);
 
   // The operator-typed trigger and Pass/Fail entry belong to the live session's mode: cleared on
   // a mode change and on a restore.
@@ -460,7 +474,7 @@ export default function Home() {
     resetEntryFields();
   }, [resetEntryFields]);
 
-  const { status: saveStatus, previous, restore } =
+  const { status: saveStatus, previous, historyRev, restore } =
     useSessionPersistence(persister, hasRows, commitRestore, ingestBatch);
   const feedReadings = restore.feed;
 
@@ -565,31 +579,8 @@ export default function Home() {
     setSampleVersion((v) => v + 1);
   }, [store, persister]);
 
-  // Serializes the same canonical store the Data Log renders and the chart draws. Numeric
-  // only (OL is excluded upstream), so every stored value is a real measurement.
-  //
-  // The value column is reconstructed in the unit the meter reported, from the stored base
-  // value and digit count, so the file is unchanged from before the store existed —
-  // including the mixed-unit case where auto-ranging put mV and V rows in one export.
-  // `toFixed`, never `String`: a number has no memory of trailing zeros, and `0.1450` at
-  // 0.1 mV resolution is a different measurement from `0.145` at 1 mV.
   const exportCsv = useCallback(() => {
-    function* lines() {
-      // The table's own formatter: local time with offset, so file and screen agree.
-      const isoOf = createIsoFormatter();
-      for (let i = 0; i < store.count; i++) {
-        const sm = store.at(i);
-        const factor = SCALE[sm.unit]?.factor ?? 1;
-        yield [
-          isoOf(sm.ts),
-          sm.mode,
-          (sm.value / factor).toFixed(sm.decimals),
-          sm.unit,
-          csvEsc(sm.note),
-        ].join(',');
-      }
-    }
-    downloadCsv(csvBlob('Timestamp,Mode,Value,Unit,Notes', lines()), `multimeter-${Date.now()}.csv`);
+    downloadCsv(csvBlob(SAMPLE_CSV_HEADER, sampleCsvLines(store)), `multimeter-${Date.now()}.csv`);
   }, [store]);
 
   // Same unit convention as the Data Log export: the meter's own unit token per row.
@@ -609,17 +600,10 @@ export default function Home() {
   // after a preserve-log reset. Reading the store here would put two differently-valued
   // tiles labelled "Samples" on one screen.
   const recordedCount = sessionStats?.count ?? 0;
+  // What the Clear and Restore dialogs promise about the live session.
+  const keepLive = persister.willKeep({ count: sampleCount, verdicts: passFailRows.length, notes: store.noteCount });
   const canExport = sampleCount > 0;
-  // An inverted manual range (minimum at or above maximum) describes no window at all.
-  // Applying it would hand Chart.js `min > max`, which silently renders an empty or
-  // upside-down axis — so it is ignored and auto-scaling continues, and Controls says so
-  // instead of leaving the operator to wonder why their numbers did nothing.
-  const rangeMinNum = toFinite(rangeMin);
-  const rangeMaxNum = toFinite(rangeMax);
-  const rangeInvalid =
-    !autoScale && rangeMinNum !== null && rangeMaxNum !== null && rangeMinNum >= rangeMaxNum;
-  const effectiveYMin = autoScale || rangeInvalid ? undefined : (rangeMinNum ?? undefined);
-  const effectiveYMax = autoScale || rangeInvalid ? undefined : (rangeMaxNum ?? undefined);
+  const { rangeInvalid, yMin: effectiveYMin, yMax: effectiveYMax } = resolveRange(autoScale, rangeMin, rangeMax);
   // Histogram bin width + stat decimals. With data present, use the frozen coarsest
   // recorded resolution so both stay stable when logging stops and the live value
   // auto-ranges or goes OL; when empty, derive from the live reading as a preview.
@@ -782,6 +766,9 @@ export default function Home() {
             onOpenPanel={() => setSheet('pass-fail')}
             onClosePanel={closeSheet}
           />
+        ) : view === 'history' ? (
+          <History persister={persister} status={saveStatus} historyRev={historyRev}
+            restoring={restore.restoring} onRestore={restore.request} onNavigate={navigate} />
         ) : (
           <Settings settings={settings} onChange={updateSettings} />
         )}
@@ -797,26 +784,13 @@ export default function Home() {
       {/* Connected-but-no-data warning — overlays every view; informational only. */}
       {overlayVisible && <NoDataWarning transport={active} onDismiss={() => setNoDataDismissed(true)} />}
       {confirmClear && (
-        <ConfirmDialog
-          title="Clear all recorded data?"
-          body={
-            <p>
-              This permanently removes{' '}
-              <strong className="text-fg">{sampleCount.toLocaleString()} recorded samples</strong>{' '}
-              from the chart, statistics and Data Log, and deletes their saved copy. It cannot be
-              recovered. Export a CSV first if you need them.
-            </p>
-          }
-          confirmLabel="Clear data"
-          onConfirm={confirmFlush}
-          onCancel={cancelClear}
-        />
+        <ClearConfirm samples={sampleCount} keep={keepLive} onConfirm={confirmFlush} onCancel={cancelClear} />
       )}
       <SessionConfirm
         pending={restore.pending}
-        previous={previous}
         samples={sampleCount}
         verdictRows={passFailRows.length}
+        keep={keepLive}
         onConfirm={restore.confirm}
         onCancel={restore.cancel}
       />
