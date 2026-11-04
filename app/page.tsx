@@ -27,6 +27,7 @@ import {
 import { useSerial } from '@/lib/useSerial';
 import { useBle } from '@/lib/useBle';
 import { useShortcuts } from '@/lib/useShortcuts';
+import { useLiveTitle } from '@/lib/useLiveTitle';
 import { useSessionPersistence } from '@/lib/useSessionPersistence';
 import { SessionPersister, type SaveStatus } from '@/lib/sessionPersister';
 import { isBusy, type ConnectionStatus, type Transport } from '@/lib/connection';
@@ -527,6 +528,8 @@ export default function Home() {
   // Single source of truth for both the overlay and the audio: the warning is visible
   // only while enabled, the condition holds, and it hasn't been dismissed this outage.
   const overlayVisible = noDataWarning && noData && !noDataDismissed;
+
+  useLiveTitle(current, status === 'connected', noData);
 
   useEffect(() => {
     beeperRef.current = createBeeper();
