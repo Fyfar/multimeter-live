@@ -1,34 +1,28 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { flushSync } from 'react-dom';
-import { clsx } from 'clsx';
-import { SAMPLE_CSV_HEADER, csvBlob, downloadCsv, sampleCsvLines } from '@/lib/csv';
-import { VERDICT_CSV_HEADER, verdictCsvLine } from '@/lib/passfail';
+import { exportSamplesCsv } from '@/lib/csv';
+import { exportVerdictsCsv } from '@/lib/passfail';
 import { HISTORY_MAX_AGE_MS, type SessionSummary } from '@/lib/persist';
 import { SampleStore } from '@/lib/samples';
-import type { SaveStatus, SessionPersister } from '@/lib/sessionPersister';
+import { reasonOf, type SaveStatus, type SessionPersister } from '@/lib/sessionPersister';
 import { ConfirmDialog } from './ConfirmDialog';
-import { modeLabel, sessionName } from './SessionNotices';
+import { focusMain, modeLabel, sessionButton, sessionName } from './SessionNotices';
 
 const KEEP_DAYS = HISTORY_MAX_AGE_MS / 86_400_000;
-const BUTTON = 'rounded-md border px-3 py-1 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60';
-const reasonOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 // Reads the session back into a scratch store, so the live one is never touched, and writes the
 // same file the Data Log / Pass/Fail export would.
 async function exportSession(persister: SessionPersister, s: SessionSummary, verdicts: boolean) {
   const a = await persister.readSession(s.id);
-  if (verdicts) {
-    downloadCsv(csvBlob(VERDICT_CSV_HEADER, a.verdicts.map(verdictCsvLine)), `multimeter-passfail-${Date.now()}.csv`);
-    return;
-  }
+  if (verdicts) return exportVerdictsCsv(a.verdicts);
   const store = new SampleStore();
   store.load(a.loadable);
-  downloadCsv(csvBlob(SAMPLE_CSV_HEADER, sampleCsvLines(store)), `multimeter-${Date.now()}.csv`);
+  exportSamplesCsv(store);
 }
 
-function SessionRow({ s, disabled, onRestore, onExport, onDelete }: {
+const SessionRow = memo(function SessionRow({ s, disabled, onRestore, onExport, onDelete }: {
   s: SessionSummary;
   disabled: boolean;
   onRestore: (s: SessionSummary) => void;
@@ -36,6 +30,7 @@ function SessionRow({ s, disabled, onRestore, onExport, onDelete }: {
   onDelete: (s: SessionSummary) => void;
 }) {
   const name = sessionName(s);
+  const hasVerdicts = (s.verdicts ?? 0) > 0;
   return (
     <li className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 px-4 py-3">
       <div className="min-w-0 text-sm">
@@ -45,33 +40,33 @@ function SessionRow({ s, disabled, onRestore, onExport, onDelete }: {
         </p>
         <p className="text-xs text-muted">
           {s.count.toLocaleString()} samples
-          {(s.verdicts ?? 0) > 0 && ` · ${s.verdicts} Pass/Fail rows`} · last activity{' '}
+          {hasVerdicts && ` · ${s.verdicts} Pass/Fail rows`} · last activity{' '}
           {new Date(s.lastTs).toLocaleString()}
         </p>
       </div>
       <div className="flex flex-wrap gap-2">
         <button onClick={() => onRestore(s)} disabled={disabled} aria-label={`Restore ${name}`}
-          className={clsx(BUTTON, 'border-accent bg-accent text-white hover:brightness-110')}>
+          className={sessionButton('primary')}>
           Restore
         </button>
         <button onClick={() => onExport(s, false)} disabled={disabled} aria-label={`Export CSV of ${name}`}
-          className={clsx(BUTTON, 'border-border bg-surface text-fg hover:brightness-110')}>
+          className={sessionButton('neutral')}>
           Export CSV
         </button>
-        {(s.verdicts ?? 0) > 0 && (
+        {hasVerdicts && (
           <button onClick={() => onExport(s, true)} disabled={disabled} aria-label={`Export Pass/Fail CSV of ${name}`}
-            className={clsx(BUTTON, 'border-border bg-surface text-fg hover:brightness-110')}>
+            className={sessionButton('neutral')}>
             Export Pass/Fail CSV
           </button>
         )}
         <button onClick={() => onDelete(s)} disabled={disabled} aria-label={`Delete ${name}`}
-          className={clsx(BUTTON, 'border-danger/30 bg-danger/10 text-danger hover:bg-danger/20')}>
+          className={sessionButton('danger')}>
           Delete
         </button>
       </div>
     </li>
   );
-}
+});
 
 // The kept sessions, re-read whenever storage changes them or this page's hold on it changes.
 // null: storage not open yet. Never shown as "no sessions".
@@ -132,7 +127,7 @@ export function History({ persister, status, historyRev, restoring, onRestore, o
   // Focus goes to the Dashboard's content, not lost with the button that started the restore.
   const restore = useCallback((s: SessionSummary) => onRestore(s, () => {
     flushSync(() => onNavigate('dashboard'));
-    document.querySelector<HTMLElement>('main')?.focus();
+    focusMain();
   }), [onRestore, onNavigate]);
 
   const handleExport = useCallback(async (s: SessionSummary, verdicts: boolean) => {

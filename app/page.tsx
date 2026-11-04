@@ -21,7 +21,7 @@ import {
 import { SampleStore } from '@/lib/samples';
 import { CaptureEngine, type RestoreResult, type SessionStats } from '@/lib/capture';
 import {
-  VERDICT_CSV_HEADER, isSupportedMode, parseEntry, verdictCsvLine,
+  exportVerdictsCsv, isSupportedMode, parseEntry,
   type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
 import { useSerial } from '@/lib/useSerial';
@@ -35,7 +35,7 @@ import {
   DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings as SettingValues,
 } from '@/lib/settings';
 import { createBeeper, type Beeper } from '@/lib/beep';
-import { SAMPLE_CSV_HEADER, csvBlob, downloadCsv, sampleCsvLines } from '@/lib/csv';
+import { exportSamplesCsv } from '@/lib/csv';
 // App version — single source of truth is package.json "version". Bump it on every
 // change (see AGENTS.md "Versioning") so the footer reflects what's deployed.
 import { version as APP_VERSION } from '@/package.json';
@@ -395,7 +395,9 @@ export default function Home() {
   // hung storage cannot hang Clear.
   const confirmFlush = useCallback(async () => {
     setConfirmClear(false);
-    await Promise.race([persister.saveNow(), new Promise((r) => setTimeout(r, CLEAR_SAVE_MS))]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([persister.saveNow(), new Promise((r) => { timer = setTimeout(r, CLEAR_SAVE_MS); })]);
+    clearTimeout(timer);
     engine.flush();
     commitFlush();
   }, [engine, persister, commitFlush]);
@@ -596,17 +598,10 @@ export default function Home() {
     setSampleVersion((v) => v + 1);
   }, [store, persister]);
 
-  const exportCsv = useCallback(() => {
-    downloadCsv(csvBlob(SAMPLE_CSV_HEADER, sampleCsvLines(store)), `multimeter-${Date.now()}.csv`);
-  }, [store]);
+  const exportCsv = useCallback(() => exportSamplesCsv(store), [store]);
 
   // Same unit convention as the Data Log export: the meter's own unit token per row.
-  const exportVerdictCsv = useCallback(() => {
-    function* lines() {
-      for (const row of engine.passFailRows) yield verdictCsvLine(row);
-    }
-    downloadCsv(csvBlob(VERDICT_CSV_HEADER, lines()), `multimeter-passfail-${Date.now()}.csv`);
-  }, [engine]);
+  const exportVerdictCsv = useCallback(() => exportVerdictsCsv(engine.passFailRows), [engine]);
 
   // The Pass/Fail view's active mode: the live reading's mode when supported, else null
   // (which renders the unsupported-mode explanation).

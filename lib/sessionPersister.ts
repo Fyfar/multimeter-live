@@ -61,7 +61,13 @@ const requestLock = (): Promise<(() => void) | null> =>
       return new Promise<void>((r) => resolve(r));
     }).catch(reject);
   });
-const reasonOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
+// What a set of ended sessions does to storage, plus the one summary written alongside (if any).
+const endsBatch = (ends: ReturnType<typeof endSession>[], summary: SessionSummary | null): Batch => ({
+  removeSessions: ends.map((e) => e.removeSession).filter((id) => id !== null),
+  summaries: [...ends.map((e) => e.closeSummary), summary].filter((x) => x !== null),
+});
+
+export const reasonOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export class SessionPersister {
   private readonly store: SampleStore;
@@ -262,11 +268,7 @@ export class SessionPersister {
   // Reads the store now, synchronously: the plan describes this instant, and the write is async.
   private batchOf(plan: FlushPlan, rows: VerdictRow[]): Batch {
     const s = plan.summary;
-    const ends = [plan, ...this.orphans.map(endSession)];
-    const batch: Batch = {
-      removeSessions: ends.map((e) => e.removeSession).filter((id) => id !== null),
-      summaries: [...ends.map((e) => e.closeSummary), s].filter((x) => x !== null),
-    };
+    const batch: Batch = endsBatch([plan, ...this.orphans.map(endSession)], s);
     if (s === null) return batch;
     batch.segments = plan.segments.map(({ seq, n }) => ({
       id: s.id,
@@ -413,10 +415,7 @@ export class SessionPersister {
       this.notesDirty = false;
       this.savedRows = this.engine.passFailRows;
       try {
-        await this.write(db, {
-          removeSessions: ends.map((e) => e.removeSession).filter((x) => x !== null),
-          summaries: [...ends.map((e) => e.closeSummary), { ...target, state: 'active' as const }].filter((x) => x !== null),
-        });
+        await this.write(db, endsBatch(ends, { ...target, state: 'active' }));
         this.orphans = [];
         this.last = adoptedMark(target, generation, remapped);
         this.historyChanged({ previous, status: { kind: 'saved', at: Date.now() } });

@@ -102,3 +102,6 @@ export const downloadCsv = (blob: Blob, name: string) => {
   a.click();
   URL.revokeObjectURL(url);
 };
+
+export const exportSamplesCsv = (store: SampleStore) =>
+  downloadCsv(csvBlob(SAMPLE_CSV_HEADER, sampleCsvLines(store)), `multimeter-${Date.now()}.csv`);

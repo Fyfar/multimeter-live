@@ -9,6 +9,6 @@ export function useLiveTitle(reading: Reading | null, connected: boolean, silent
   useEffect(() => {
     const value = connected && !silent && reading ? [reading.display, displayUnit(reading.unit)].filter(Boolean).join(' ') : '';
     const title = value ? `${value} · ${APP_NAME}` : APP_NAME;
-    if (document.title !== title) document.title = title;
+    document.title = title;
   }, [reading, connected, silent]);
 }

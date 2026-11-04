@@ -51,7 +51,15 @@ export function SaveIndicator({ status }: { status: SaveStatus }) {
   );
 }
 
-const BUTTON = 'rounded-md border px-3 py-1 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent';
+const BUTTON = 'rounded-md border px-3 py-1 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:opacity-60';
+const VARIANT = {
+  primary: 'border-accent bg-accent text-white hover:brightness-110',
+  neutral: 'border-border bg-surface text-fg hover:brightness-110',
+  danger: 'border-danger/30 bg-danger/10 text-danger hover:bg-danger/20',
+};
+export const sessionButton = (v: keyof typeof VARIANT) => clsx(BUTTON, VARIANT[v]);
+
+export const focusMain = () => document.querySelector<HTMLElement>('main')?.focus();
 
 export function SessionNotices({
   previous, deferred, status, restoring, restoreError, onRestore, onLater, onDiscard, onDismissError,
@@ -75,7 +83,7 @@ export function SessionNotices({
     if (offer) offered.current = true;
     else if (offered.current) {
       offered.current = false;
-      if (document.activeElement === document.body) document.querySelector<HTMLElement>('main')?.focus();
+      if (document.activeElement === document.body) focusMain();
     }
   }, [offer]);
   if (!offer && !restoreError && !otherTab) return null;
@@ -90,15 +98,15 @@ export function SessionNotices({
           </p>
           <div className="flex gap-2">
             <button onClick={() => onRestore(offer)} disabled={restoring}
-              className={clsx(BUTTON, 'border-accent bg-accent text-white hover:brightness-110 disabled:opacity-60')}>
+              className={sessionButton('primary')}>
               {restoring ? 'Restoring…' : 'Restore'}
             </button>
             <button onClick={onLater} disabled={restoring}
-              className={clsx(BUTTON, 'border-border bg-surface text-fg hover:brightness-110 disabled:opacity-60')}>
+              className={sessionButton('neutral')}>
               Later
             </button>
             <button onClick={onDiscard} disabled={restoring}
-              className={clsx(BUTTON, 'border-danger/30 bg-danger/10 text-danger hover:bg-danger/20 disabled:opacity-60')}>
+              className={sessionButton('danger')}>
               Discard
             </button>
           </div>
@@ -109,7 +117,7 @@ export function SessionNotices({
           <p role="alert" className="min-w-0 flex-1 text-amber">
             The session could not be restored: {restoreError}. It is still kept in History.
           </p>
-          <button onClick={onDismissError} className={clsx(BUTTON, 'border-border bg-surface text-fg hover:brightness-110')}>
+          <button onClick={onDismissError} className={sessionButton('neutral')}>
             OK
           </button>
         </div>

@@ -5,7 +5,7 @@
 
 import { SCALE, type Mode } from './parser.ts';
 import { siPrefixOf } from './si.ts';
-import { csvEsc } from './csv.ts';
+import { csvBlob, csvEsc, downloadCsv } from './csv.ts';
 import type { SessionStats } from './capture.ts';
 
 // ---------------------------------------------------------------- SI value parsing
@@ -285,7 +285,7 @@ export function summarizeBatch(rows: readonly VerdictRow[], mode: SupportedMode 
 
 // ------------------------------------------------------------------- CSV export
 
-export const VERDICT_CSV_HEADER = 'Timestamp,Mode,Measured,Unit,Reference,Tolerance,Deviation,Verdict';
+const VERDICT_CSV_HEADER = 'Timestamp,Mode,Measured,Unit,Reference,Tolerance,Deviation,Verdict';
 
 // Base -> entry is a division, so the error is relative and far below 12 significant digits:
 // rounding there strips it (`1.0010000000000001e-7` -> `1e-7`-style noise) without touching
@@ -325,3 +325,6 @@ export function verdictCsvLine(row: VerdictRow): string {
     String(deviation), row.verdict,
   ].join(',');
 }
+
+export const exportVerdictsCsv = (rows: readonly VerdictRow[]) =>
+  downloadCsv(csvBlob(VERDICT_CSV_HEADER, rows.map(verdictCsvLine)), `multimeter-passfail-${Date.now()}.csv`);
