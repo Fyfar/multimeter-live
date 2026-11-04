@@ -274,6 +274,10 @@ export class SampleStore {
     return [...this.#notes];
   }
 
+  get noteCount(): number {
+    return this.#notes.size;
+  }
+
   /** The note on `seq`, or `''`. */
   noteOf(seq: number): string {
     return this.#notes.get(seq) ?? '';

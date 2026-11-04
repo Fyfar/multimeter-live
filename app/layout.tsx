@@ -18,7 +18,7 @@ const geistMono = Geist_Mono({
 const basePath = process.env.PAGES_BASE_PATH ?? "";
 
 export const metadata: Metadata = {
-  title: "Multimeter Visualizer",
+  title: "Multimeter·Live", // same name as APP_NAME in lib/useLiveTitle.ts (a server file cannot import that hook module)
   description: "Real-time multimeter data visualization over Web Serial",
   manifest: `${basePath}/manifest.webmanifest`,
   icons: {

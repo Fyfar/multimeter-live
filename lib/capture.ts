@@ -171,14 +171,20 @@ export class CaptureEngine {
   }
 
   // `manual`: a toggle by the operator, so this session is not trigger-owned and is never
-  // auto-stopped.
-  setRecording(v: boolean, manual = false): void {
+  // auto-stopped. Returns true when it flushed first: a session whose newest sample is past the
+  // retention window (a restored old one, or one left idle for a week) would be trimmed away by
+  // the first new sample, so recording ends it (the saved copy keeps it) and starts a new one.
+  setRecording(v: boolean, manual = false): boolean {
+    const n = this.store.count;
+    const stale = v && n > 0 && Date.now() - this.store.tsAt(n - 1) > RETENTION_MS;
+    if (stale) this.flush();
     if (manual) this.triggerStarted = false;
     this.recording = v;
     // A stop (manual or disconnect) ends any trigger-started session.
     if (!v) this.triggerStarted = false;
     // A fresh start must not inherit a stale predecessor/run from before it began.
     if (v) { this.runAnchor = null; this.stableRun = 0; this.lastLoggedValue = null; }
+    return stale;
   }
 
   // Clears only the verdict batch — the Data Log's recorded rows are untouched, and

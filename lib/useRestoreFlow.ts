@@ -3,16 +3,21 @@
 import { useCallback, useRef, useState } from 'react';
 import type { RestoreResult } from './capture';
 import type { Reading } from './parser';
+import type { SessionSummary } from './persist';
 import type { SessionPersister } from './sessionPersister';
 
-/** What the open confirm dialog is about. `otherMode`: the meter's mode, when not the saved one. */
-export type PendingConfirm = { kind: 'restore'; otherMode: string | null } | { kind: 'discard' } | null;
+/** The restore awaiting confirmation. `otherMode`: the meter's mode, when not the target's. */
+export type PendingConfirm = {
+  target: SessionSummary;
+  otherMode: string | null;
+  onRestored?: () => void;
+} | null;
 
 /**
- * The operator's side of Restore: ask first when there are live rows or the meter is in another
- * mode, hold the meter's readings while the restore runs, then replay them. Discard always asks.
- * `commit` applies a successful `RestoreResult` to React state; `ingest` is the page's per-batch
- * commit.
+ * The operator's side of Restore, from the notice or History: ask first when there are live rows
+ * or the meter is in another mode, hold the meter's readings while the restore runs, then replay
+ * them. `commit` applies a successful `RestoreResult` to React state; `ingest` is the page's
+ * per-batch commit.
  */
 export function useRestoreFlow(
   persister: SessionPersister,
@@ -34,12 +39,16 @@ export function useRestoreFlow(
     else ingest(readings);
   }, [ingest]);
 
-  const run = useCallback(async () => {
+  // A second run while one is in flight would reset the flag early and replay held readings into
+  // a store about to be replaced.
+  const run = useCallback(async (target: SessionSummary, onRestored?: () => void) => {
+    if (restoringRef.current) return;
     restoringRef.current = true;
     setRestoring(true);
     setError(null);
-    const out = await persister.restore();
-    if (out.ok) commit(out.result);
+    // Never left pending on a throw: `restoringRef` would then hold every later reading.
+    const out = await persister.restore(target.id).catch((e: unknown) => ({ ok: false as const, reason: String(e) }));
+    if (out.ok) { commit(out.result); onRestored?.(); }
     else setError(out.reason);
     restoringRef.current = false;
     setRestoring(false);
@@ -50,16 +59,16 @@ export function useRestoreFlow(
     for (const batch of held) ingest(batch);
   }, [persister, commit, ingest]);
 
-  const request = useCallback(() => {
-    const otherMode = persister.otherLiveMode();
-    if (hasRows || otherMode !== null) setPending({ kind: 'restore', otherMode });
-    else void run();
+  const request = useCallback((target: SessionSummary, onRestored?: () => void) => {
+    if (restoringRef.current) return;
+    const otherMode = persister.otherLiveMode(target.mode);
+    if (hasRows || otherMode !== null) setPending({ target, otherMode, onRestored });
+    else void run(target, onRestored);
   }, [persister, hasRows, run]);
   const confirm = useCallback(() => {
     setPending(null);
-    if (pending?.kind === 'discard') void persister.discard();
-    else void run();
-  }, [pending, persister, run]);
+    if (pending !== null) void run(pending.target, pending.onRestored);
+  }, [pending, run]);
 
   return {
     restoring,
@@ -72,6 +81,6 @@ export function useRestoreFlow(
     cancel: useCallback(() => setPending(null), []),
     defer: useCallback(() => setDeferred(true), []),
     dismissError: useCallback(() => setError(null), []),
-    discard: useCallback(() => setPending({ kind: 'discard' }), []),
+    discard: useCallback(() => { void persister.discard(); }, [persister]),
   };
 }

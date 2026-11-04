@@ -1,7 +1,12 @@
-// CSV assembly. No React, no DOM: `Blob` is a global in browsers and in Node 18+, so
-// scripts/check-csv.mts loads this directly under Node's type stripping. It has to, because
-// the one property that matters here — that the assembled file is byte-identical to a single
-// join — is arithmetic at chunk boundaries and cannot be checked by looking at the screen.
+// CSV assembly. No React, and the DOM only in `downloadCsv`: `Blob` is a global in browsers and
+// in Node 18+, so scripts/check-csv.mts loads this directly under Node's type stripping. It has
+// to, because the one property that matters here — that the assembled file is byte-identical to
+// a single join — is arithmetic at chunk boundaries and cannot be checked by looking at the
+// screen.
+
+import { SCALE } from './parser.ts';
+import type { SampleStore } from './samples.ts';
+import { createIsoFormatter } from './search.ts';
 
 /** Quote a field only when it needs it, doubling any embedded quotes. */
 export const csvEsc = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
@@ -69,3 +74,34 @@ export function csvBlob(header: string, lines: Iterable<string>): Blob {
   absorb();
   return new Blob(blobs, { type });
 }
+
+export const SAMPLE_CSV_HEADER = 'Timestamp,Mode,Value,Unit,Notes';
+
+/**
+ * The Data Log export's rows, for the live session and for one read back from History alike.
+ * Recorded values only (OL is excluded upstream). The value is reconstructed in the unit the
+ * meter reported, from the stored base value and digit count, so the file is unchanged from
+ * before the store existed, including mixed mV/V rows from auto-ranging. `toFixed`, never
+ * `String`: `0.1450` at 0.1 mV resolution is a different measurement from `0.145` at 1 mV.
+ */
+export function* sampleCsvLines(store: SampleStore): Generator<string> {
+  // The table's own formatter: local time with offset, so file and screen agree.
+  const isoOf = createIsoFormatter();
+  for (let i = 0; i < store.count; i++) {
+    const sm = store.at(i);
+    const factor = SCALE[sm.unit]?.factor ?? 1;
+    yield [isoOf(sm.ts), sm.mode, (sm.value / factor).toFixed(sm.decimals), sm.unit, csvEsc(sm.note)].join(',');
+  }
+}
+
+export const downloadCsv = (blob: Blob, name: string) => {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+export const exportSamplesCsv = (store: SampleStore) =>
+  downloadCsv(csvBlob(SAMPLE_CSV_HEADER, sampleCsvLines(store)), `multimeter-${Date.now()}.csv`);

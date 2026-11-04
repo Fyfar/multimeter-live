@@ -26,6 +26,9 @@ account, no backend. Your data never leaves your machine.
 - **Survives a reload, a crash or a browser restart.** The session, its notes and Pass/Fail
   verdicts are saved in your browser every few seconds while you record; when you come back,
   one click restores it. A week-long log comes back in under a second.
+- **History of your sessions.** Clearing the log or turning the dial no longer throws a
+  session away: it goes to History, where you can restore it, export it to CSV or delete it.
+  Sessions are kept for 30 days; short tests (under 30 samples, no verdict or note) are not.
 - **Smart capture.** Record only stable values, or let a trigger threshold start and stop
   recording for you.
 - **USB or Bluetooth.** Use a USB-UART adapter, or go wireless with a BLE serial module
@@ -33,6 +36,8 @@ account, no backend. Your data never leaves your machine.
 - **Desktop, tablet and phone.** The layout adapts to the screen.
 - **Installable and offline.** Install it like a native app; after the first visit it
   needs no network. Updates never interrupt a recording.
+- **Keyboard shortcuts.** `Space` starts or stops logging, `1`–`5` switch views, `H` flips the
+  chart between line and histogram, `?` lists them.
 - **Light and dark themes.**
 
 ## What you need
@@ -57,9 +62,9 @@ served over `https://` or `localhost`; the hosted app already is.
 ## Good to know
 
 - **A saved session is never reopened by itself.** A reload brings back the connection and
-  an empty session, with a banner offering Restore, Later or Discard. A crash loses at most
-  the last few seconds (up to about 20 s if the tab was in the background). One previous
-  session is kept, and a newer one replaces it; Clear Data deletes the saved copy too.
+  an empty session, with a banner offering Restore, Later or Discard (Discard only hides it;
+  it stays in History). A crash, a mode change or a trigger loses at most the last few
+  seconds (up to about 20 s if the tab was in the background); Clear saves everything first.
 - **Saving is per browser, one tab at a time.** A second tab saves nothing until the first
   one closes, and the header says so. A private window forgets the session when it closes,
   and clearing site data deletes it. The saved copy is a safety net, not an archive: export

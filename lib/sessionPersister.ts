@@ -9,8 +9,8 @@
 import type { CaptureEngine, RestoreResult } from './capture';
 import type { VerdictRow } from './passfail';
 import {
-  adoptedMark, assembleSession, planFlush, planLoad,
-  type FlushMark, type FlushPlan, type FlushView, type SessionSummary,
+  adoptedMark, assembleSession, endSession, isKeepable, planFlush, planLoad,
+  type Assembled, type FlushMark, type FlushPlan, type FlushView, type SessionSummary,
 } from './persist';
 import { MODES, type SampleStore } from './samples';
 import { SessionDb, type Batch } from './sessionDb';
@@ -34,15 +34,12 @@ export type SaveStatus =
   | { kind: 'other-tab' }
   | { kind: 'unavailable' };
 
-export interface PreviousSession {
-  count: number;
-  lastTs: number;
-  mode: string | null;
-}
-
 export interface PersistSnapshot {
   status: SaveStatus;
-  previous: PreviousSession | null;
+  // The session the restore notice offers.
+  previous: SessionSummary | null;
+  // Bumped by every write that changes a session other than the live one: History re-lists.
+  historyRev: number;
 }
 
 export type RestoreOutcome = { ok: true; result: RestoreResult } | { ok: false; reason: string };
@@ -64,24 +61,30 @@ const requestLock = (): Promise<(() => void) | null> =>
       return new Promise<void>((r) => resolve(r));
     }).catch(reject);
   });
-const reasonOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
+// What a set of ended sessions does to storage, plus the one summary written alongside (if any).
+const endsBatch = (ends: ReturnType<typeof endSession>[], summary: SessionSummary | null): Batch => ({
+  removeSessions: ends.map((e) => e.removeSession).filter((id) => id !== null),
+  summaries: [...ends.map((e) => e.closeSummary), summary].filter((x) => x !== null),
+});
+
+export const reasonOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export class SessionPersister {
   private readonly store: SampleStore;
   private readonly engine: CaptureEngine;
-  private snap: PersistSnapshot = { status: { kind: 'idle' }, previous: null };
+  private snap: PersistSnapshot = { status: { kind: 'idle' }, previous: null, historyRev: 0 };
   private readonly listeners = new Set<() => void>();
 
   private db: SessionDb | null = null;
-  private previousSummary: SessionSummary | null = null;
   // What the last successful write left in storage; null until something has been saved.
   private last: FlushMark | null = null;
   private notesDirty = false;
   // The verdict rows last written. The engine replaces the array on every change, never
   // mutates it, so a different reference is a change.
   private savedRows: VerdictRow[] | null = null;
-  // A session a failed Restore write left `active` in storage; removed by the next write.
-  private orphan: number | null = null;
+  // Live sessions failed Restore writes left `active` in storage; the next write ends them.
+  private orphans: SessionSummary[] = [];
+  private minId = 0;
   private lastFlushAt = 0;
   private persistAsked = false;
   // Flushes, Discard and Restore share one chain, so only one operation is ever in flight.
@@ -114,6 +117,10 @@ export class SessionPersister {
     this.publish({ status });
   }
 
+  private historyChanged(patch: Partial<PersistSnapshot> = {}) {
+    this.publish({ ...patch, historyRev: this.snap.historyRev + 1 });
+  }
+
   async start(): Promise<void> {
     const epoch = ++this.epoch;
     const alive = () => this.epoch === epoch;
@@ -137,9 +144,8 @@ export class SessionPersister {
       const { db, previous } = await withTimeout(loading, OPEN_TIMEOUT_MS);
       if (!alive()) { db.close(); return; } // dispose() released the lock
       this.db = db;
-      this.previousSummary = previous;
       this.arm();
-      this.publish({ previous: previous && { count: previous.count, lastTs: previous.lastTs, mode: previous.mode } });
+      this.historyChanged({ previous });
     } catch {
       if (!alive()) return;
       // Not saving, so not holding the lock either: another tab may save instead. A load that
@@ -161,8 +167,7 @@ export class SessionPersister {
     this.db = null;
     this.last = null;
     this.savedRows = null;
-    this.orphan = null;
-    this.previousSummary = null;
+    this.orphans = [];
     this.flushQueued = false;
   }
 
@@ -186,17 +191,14 @@ export class SessionPersister {
     return withTimeout(db.write(batch), WRITE_TIMEOUT_MS);
   }
 
-  // Whatever a dead page left active becomes THE previous session; anything older is deleted.
   private async load(): Promise<{ db: SessionDb; previous: SessionSummary | null }> {
     const db = await SessionDb.open();
-    const rows = await db.summaries();
-    const plan = planLoad(rows);
-    const keep = rows.find((r) => r.id === plan.keep) ?? null;
-    const previous = keep && { ...keep, state: 'previous' as const };
-    if (plan.relabel || plan.remove.length > 0) {
-      await db.write({ removeSessions: plan.remove, summaries: plan.relabel && previous ? [previous] : [] });
+    const plan = planLoad(await db.summaries(), Date.now());
+    if (plan.relabel.length > 0 || plan.remove.length > 0) {
+      await db.write({ removeSessions: plan.remove, summaries: plan.relabel });
     }
-    return { db, previous };
+    this.minId = plan.maxId + 1;
+    return { db, previous: plan.previous };
   }
 
   // Three triggers, because timers alone are not enough: Chrome throttles background-tab timers.
@@ -251,6 +253,8 @@ export class SessionPersister {
       firstTs: count > 0 ? this.store.tsAt(0) : null,
       lastTs: count > 0 ? this.store.tsAt(count - 1) : null,
       verdictRows: this.engine.passFailRows.length,
+      notes: this.store.noteCount,
+      minId: this.minId,
       mode: ctx.mode,
       unit: ctx.unit,
       chartFromSeq: ctx.chartFromSeq,
@@ -264,10 +268,7 @@ export class SessionPersister {
   // Reads the store now, synchronously: the plan describes this instant, and the write is async.
   private batchOf(plan: FlushPlan, rows: VerdictRow[]): Batch {
     const s = plan.summary;
-    const batch: Batch = {
-      removeSessions: [plan.removeSession, this.orphan].filter((id) => id !== null),
-      summaries: s ? [s] : [],
-    };
+    const batch: Batch = endsBatch([plan, ...this.orphans.map(endSession)], s);
     if (s === null) return batch;
     batch.segments = plan.segments.map(({ seq, n }) => ({
       id: s.id,
@@ -307,11 +308,67 @@ export class SessionPersister {
       return;
     }
     this.savedRows = rows;
-    this.orphan = null;
+    const ended = plan.closeSummary !== null || this.orphans.length > 0;
+    this.orphans = [];
     const s = plan.summary;
     this.last = s ? { summary: s, generation: view.generation } : null;
+    if (s) this.minId = Math.max(this.minId, s.id + 1);
     this.setStatus(s ? { kind: 'saved', at: Date.now() } : { kind: 'idle' });
+    if (ended) this.historyChanged();
     if (s) this.askForPersistentStorage();
+  }
+
+  /** Resolves once everything recorded so far is written, or the write failed. */
+  saveNow(): Promise<void> {
+    return this.enqueue(() => this.flush()).catch(() => undefined);
+  }
+
+  /** Whether ending the live session with these counts would keep it in History. */
+  willKeep(counts: Pick<SessionSummary, 'count' | 'verdicts' | 'notes'>): boolean {
+    return this.db !== null && this.snap.status.kind !== 'failed' && isKeepable(counts);
+  }
+
+  // The live session (and a failed restore's leftover) is this page's: History must never act
+  // on it. A double-activated Restore would otherwise remove it and then put back a summary with
+  // no segments.
+  private isLive(id: number): boolean {
+    return id === this.last?.summary.id || this.orphans.some((o) => o.id === id);
+  }
+
+  /** Every kept session except the live one, newest first; null while there is no storage. */
+  list(): Promise<SessionSummary[] | null> {
+    return this.enqueue(async () => {
+      const db = this.db;
+      if (db === null) return null;
+      const rows = await withTimeout(db.summaries(), RESTORE_TIMEOUT_MS);
+      return rows.filter((r) => !this.isLive(r.id)).sort((a, b) => b.lastTs - a.lastTs || b.id - a.id);
+    });
+  }
+
+  /** A kept session, ready for `SampleStore.load`, without touching the live one. */
+  readSession(id: number): Promise<Assembled> {
+    return this.enqueue(async () => {
+      const db = this.db;
+      if (db === null) throw new Error('sessions are not available in this tab');
+      const stored = await withTimeout(db.read(id), RESTORE_TIMEOUT_MS);
+      if (stored === null) throw new Error('the session is no longer in storage');
+      return assembleSession(stored.summary, stored.segments, stored.notes, stored.verdicts);
+    });
+  }
+
+  /** Delete a kept session. Resolves false when refused or storage failed. */
+  remove(id: number): Promise<boolean> {
+    return this.enqueue(async () => {
+      const db = this.db;
+      if (db === null || this.isLive(id)) return false;
+      try {
+        await this.write(db, { removeSessions: [id] });
+      } catch {
+        return false;
+      }
+      this.historyChanged(this.snap.previous?.id === id ? { previous: null } : {});
+      return true;
+    });
   }
 
   // Best-effort and silent, once: without it storage may be evicted under disk pressure, which
@@ -323,68 +380,72 @@ export class SessionPersister {
   }
 
   /**
-   * Replace the live session with the previous one. Any failure before the live session is
-   * touched (read, timeout, assembly, an unknown mode) changes nothing — live or stored — and the
-   * saved data stays for Discard.
+   * Replace the live session with a kept one. The live session is saved first, then closed into
+   * History (or deleted when too short) in the write that adopts the restored one. Any failure
+   * before the live session is touched (read, timeout, assembly, an unknown mode) changes
+   * nothing, live or stored.
    */
-  restore(): Promise<RestoreOutcome> {
+  restore(id: number): Promise<RestoreOutcome> {
     return this.enqueue(async (): Promise<RestoreOutcome> => {
       const db = this.db;
-      const prev = this.previousSummary;
-      if (db === null || prev === null) return { ok: false, reason: 'no saved session is available' };
+      if (db === null) return { ok: false, reason: 'no saved session is available' };
+      if (this.isLive(id)) return { ok: false, reason: 'it is already the current session' };
+      await this.flush();
+      let target: SessionSummary;
       let result: RestoreResult;
       let remapped: boolean;
       try {
-        const stored = await withTimeout(db.read(prev.id), RESTORE_TIMEOUT_MS);
-        if (stored === null) throw new Error('the saved session is no longer in storage');
+        const stored = await withTimeout(db.read(id), RESTORE_TIMEOUT_MS);
+        if (stored === null) throw new Error('the session is no longer in storage');
+        target = stored.summary;
         const a = assembleSession(stored.summary, stored.segments, stored.notes, stored.verdicts);
         remapped = this.store.load(a.loadable);
         result = this.engine.restore({ ...a.context, verdicts: a.verdicts });
       } catch (e) {
         return { ok: false, reason: reasonOf(e) };
       }
-      // The restored session continues as the active one under its own id; this page's own
-      // session, now replaced, is deleted in the same transaction. If that write fails, storage
-      // still holds the replaced session as `active` — which the next load would offer in place
-      // of this one — so the next flush rewrites this one whole and removes it.
-      const old = this.last;
+      // The restored session continues as the active one under its own id. If the adopting
+      // write fails, storage still holds the replaced session as `active` (the next load would
+      // offer it in place of this one), so the next flush rewrites this one whole and ends it.
+      const old = this.last?.summary ?? null;
+      const replaced = old ? [...this.orphans, old] : this.orphans;
+      const ends = replaced.map(endSession);
       const generation = this.store.generation;
-      this.previousSummary = null;
+      const previous = this.snap.previous?.id === id ? null : this.snap.previous;
       this.notesDirty = false;
       this.savedRows = this.engine.passFailRows;
       try {
-        await this.write(db, { removeSessions: old ? [old.summary.id] : [], summaries: [{ ...prev, state: 'active' }] });
-        this.last = adoptedMark(prev, generation, remapped);
-        this.publish({ previous: null, status: { kind: 'saved', at: Date.now() } });
+        await this.write(db, endsBatch(ends, { ...target, state: 'active' }));
+        this.orphans = [];
+        this.last = adoptedMark(target, generation, remapped);
+        this.historyChanged({ previous, status: { kind: 'saved', at: Date.now() } });
       } catch {
-        this.last = adoptedMark(prev, generation, true);
-        this.orphan = old?.summary.id ?? null;
-        this.publish({ previous: null, status: { kind: 'failed' } });
+        this.last = adoptedMark(target, generation, true);
+        this.orphans = replaced;
+        this.historyChanged({ previous, status: { kind: 'failed' } });
       }
       return { ok: true, result };
     });
   }
 
-  /** The meter's current mode when a reading has set one and it is not the previous session's. */
-  otherLiveMode(): string | null {
+  /** The meter's current mode when a reading has set one and it is not `mode`. */
+  otherLiveMode(mode: string | null): string | null {
     const live = this.engine.context.mode;
-    const saved = this.previousSummary?.mode ?? null;
-    return live !== null && saved !== null && live !== saved ? live : null;
+    return live !== null && mode !== null && live !== mode ? live : null;
   }
 
-  /** Delete the previous session. Resolves false when storage refused (the offer stays). */
+  /** Stop offering the previous session; it stays in History. */
   discard(): Promise<boolean> {
     return this.enqueue(async () => {
       const db = this.db;
-      const prev = this.previousSummary;
+      const prev = this.snap.previous;
       if (db === null || prev === null) return false;
       try {
-        await this.write(db, { removeSessions: [prev.id] });
+        await this.write(db, { summaries: [{ ...prev, state: 'closed' }] });
       } catch {
         return false;
       }
-      this.previousSummary = null;
-      this.publish({ previous: null });
+      this.historyChanged({ previous: null });
       return true;
     });
   }

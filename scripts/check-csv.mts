@@ -82,4 +82,35 @@ checks += 4;
   checks += 3;
 }
 
+// The Data Log rows, exactly: meter unit and digits (trailing zeros kept), quoted notes, local
+// time with its offset, in more than one zone (Node re-reads TZ on assignment).
+{
+  const { sampleCsvLines, SAMPLE_CSV_HEADER } = await import('../lib/csv.ts');
+  const { SampleStore } = await import('../lib/samples.ts');
+  assert.equal(SAMPLE_CSV_HEADER, HEADER, 'the header');
+  const t = Date.UTC(2026, 8, 23, 0, 0, 0, 45);
+  const store = new SampleStore();
+  store.append(t, 0.145, 'VOLTAGE', 'mV', 1);
+  store.append(t + 1000, 1.5, 'VOLTAGE', 'V', 4);
+  store.append(t + 2000, 10_000, 'RESISTANCE', 'KOM', 3);
+  store.setNote(1, 'probe, "A"');
+  const cases: [string, string[]][] = [
+    ['UTC', [
+      '2026-09-23T00:00:00.045+00:00,VOLTAGE,145.0,mV,',
+      '2026-09-23T00:00:01.045+00:00,VOLTAGE,1.5000,V,"probe, ""A"""',
+      '2026-09-23T00:00:02.045+00:00,RESISTANCE,10.000,KOM,',
+    ]],
+    ['Asia/Kathmandu', [
+      '2026-09-23T05:45:00.045+05:45,VOLTAGE,145.0,mV,',
+      '2026-09-23T05:45:01.045+05:45,VOLTAGE,1.5000,V,"probe, ""A"""',
+      '2026-09-23T05:45:02.045+05:45,RESISTANCE,10.000,KOM,',
+    ]],
+  ];
+  for (const [tz, expected] of cases) {
+    process.env.TZ = tz;
+    assert.deepEqual([...sampleCsvLines(store)], expected, `sample lines in ${tz}`);
+    checks++;
+  }
+}
+
 console.log(`check-csv: ${checks} assertions passed`);

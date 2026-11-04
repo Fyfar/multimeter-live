@@ -16,6 +16,7 @@ export function ActionButton({
   variant = 'default',
   disabled,
   expanded,
+  shortcut,
 }: {
   onClick?: () => void;
   icon: React.ReactNode;
@@ -23,12 +24,16 @@ export function ActionButton({
   variant?: 'default' | 'active' | 'danger' | 'success';
   disabled?: boolean;
   expanded?: boolean;
+  /** Key that does the same; shown in the tooltip and exposed to assistive tech. */
+  shortcut?: string;
 }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
       aria-expanded={expanded}
+      aria-keyshortcuts={shortcut}
+      title={shortcut && `Shortcut: ${shortcut}`}
       className={clsx(
         'flex w-full items-center gap-2.5 rounded-md border px-3 py-2 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
         variant === 'active' && 'border-amber/30 bg-amber/10 text-amber hover:bg-amber/20',
@@ -59,6 +64,7 @@ export function RecordButton({
       label={recording ? 'Stop Logging' : 'Start Logging'}
       variant={recording ? 'danger' : 'success'}
       disabled={!recording && !canRecord}
+      shortcut="Space"
     />
   );
 }
