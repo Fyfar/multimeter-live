@@ -185,10 +185,12 @@ export function Sidebar({
     <aside className="flex shrink-0 border-border bg-canvas max-sm:h-14 max-sm:border-t sm:w-14 sm:flex-col sm:border-r lg:w-52">
       {/* Navigation */}
       <nav className="flex flex-1 gap-0.5 max-sm:p-1 sm:flex-col sm:p-2 sm:pt-4 lg:p-3 lg:pt-4">
-        {NAV_ITEMS.map((item) => (
+        {NAV_ITEMS.map((item, i) => (
           <button
             key={item.id}
             onClick={() => onNavChange(item.id)}
+            aria-keyshortcuts={String(i + 1)}
+            title={`${item.label} (${i + 1})`}
             aria-current={item.id === active ? 'page' : undefined}
             className={clsx(
               'flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',

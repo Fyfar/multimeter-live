@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import { ChevronDown, Moon, Sun } from 'lucide-react';
 import { DigitalDisplay } from '@/components/DigitalDisplay';
-import { RealtimeChart, type Theme } from '@/components/RealtimeChart';
+import { RealtimeChart, nextChartType, type ChartType, type Theme } from '@/components/RealtimeChart';
 import { Controls, PanelStrip, RecordButton } from '@/components/Controls';
 import { Sidebar, NAV_IDS, type NavId } from '@/components/Sidebar';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
@@ -13,6 +13,7 @@ import { Settings } from '@/components/Settings';
 import { NoDataWarning } from '@/components/NoDataWarning';
 import { PassFail } from '@/components/PassFail';
 import { History } from '@/components/History';
+import { ShortcutHelp } from '@/components/ShortcutHelp';
 import { ClearConfirm, SaveIndicator, SessionConfirm, SessionNotices } from '@/components/SessionNotices';
 import {
   displayUnit, normalizeReading, readingResolution, type Reading,
@@ -25,6 +26,7 @@ import {
 } from '@/lib/passfail';
 import { useSerial } from '@/lib/useSerial';
 import { useBle } from '@/lib/useBle';
+import { useShortcuts } from '@/lib/useShortcuts';
 import { useSessionPersistence } from '@/lib/useSessionPersistence';
 import { SessionPersister, type SaveStatus } from '@/lib/sessionPersister';
 import { isBusy, type ConnectionStatus, type Transport } from '@/lib/connection';
@@ -198,6 +200,9 @@ export default function Home() {
   // lifted, and comparing those produces a spurious FAIL.
   const [currentStable, setCurrentStable] = useState(false);
   const [recording, setRecording] = useState(false);
+  // Page state, not the chart's: the H shortcut changes it, and it survives a view switch.
+  const [chartType, setChartType] = useState<ChartType>('line');
+  const [showHelp, setShowHelp] = useState(false);
   // Bumped once per batch when the batch changed anything the UI reads. The store is a ref,
   // so nothing else tells React the numbers moved — this is the array identity that the two
   // spread-copy buffers used to provide, stated as a value instead of implied by a copy.
@@ -561,6 +566,15 @@ export default function Home() {
     // Manual toggle → this session is not trigger-owned, so never auto-stop it.
     setRec(!engine.recording, true);
   }, [engine, setRec]);
+  useShortcuts({
+    view,
+    recording,
+    connected: status === 'connected',
+    toggleRecord: handleToggleRecord,
+    goTo: (i) => navigate(NAV_IDS[i]),
+    toggleChart: () => setChartType((t) => nextChartType(t, stableOnly)),
+    openHelp: () => setShowHelp(true),
+  });
   const handleStableOnlyChange = useCallback((v: boolean) => {
     updateSettings({ stableOnly: v });
     // Enabling the filter auto-starts logging (mirrors the Record button);
@@ -692,6 +706,8 @@ export default function Home() {
                   yMax={effectiveYMax}
                   timeRange={timeRange}
                   onTimeRangeChange={(v) => updateSettings({ timeRange: v })}
+                  chartType={chartType}
+                  onChartTypeChange={setChartType}
                   binWidth={binWidth}
                   centerValue={centerValue}
                   theme={theme}
@@ -783,6 +799,7 @@ export default function Home() {
 
       {/* Connected-but-no-data warning — overlays every view; informational only. */}
       {overlayVisible && <NoDataWarning transport={active} onDismiss={() => setNoDataDismissed(true)} />}
+      <ShortcutHelp open={showHelp} onClose={() => setShowHelp(false)} />
       {confirmClear && (
         <ClearConfirm samples={sampleCount} keep={keepLive} onConfirm={confirmFlush} onCancel={cancelClear} />
       )}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { clsx } from 'clsx';
 import {
   TIME_RANGES, TIME_RANGE_MS, resolveTimeWindow, timeAxisTicks,
@@ -49,7 +49,12 @@ export type { TimeRange };
 
 const TIME_RANGE_LABELS: readonly TimeRange[] = TIME_RANGES;
 
-type ChartType = 'line' | 'histogram';
+export type ChartType = 'line' | 'histogram';
+
+// The H shortcut. With "Log distinct parts only" on, Line is unavailable, so it only ever
+// goes to the histogram (the same as the panel's "Show histogram" button).
+export const nextChartType = (t: ChartType, stableOnly: boolean): ChartType =>
+  t === 'line' || stableOnly ? 'histogram' : 'line';
 
 const CHART_TYPE_LABELS: { type: ChartType; label: string }[] = [
   { type: 'line', label: 'Line' },
@@ -475,6 +480,8 @@ export function RealtimeChart({
   yMax,
   timeRange,
   onTimeRangeChange,
+  chartType,
+  onChartTypeChange,
   binWidth,
   centerValue,
   sessionStart,
@@ -513,6 +520,9 @@ export function RealtimeChart({
   yMax?: number;
   timeRange: TimeRange;
   onTimeRangeChange: (r: TimeRange) => void;
+  /** Owned by the page so a keyboard shortcut can reach it and it survives a view switch. */
+  chartType: ChartType;
+  onChartTypeChange: (t: ChartType) => void;
   binWidth?: number;
   centerValue?: number;
   /** When this session's first point arrived; null between sessions. Anchors the
@@ -538,7 +548,6 @@ export function RealtimeChart({
   // the tick callback closes over this once, at chart creation, and the chart is only
   // re-created on `chartType`.
   const binWidthRef = useRef(binWidth);
-  const [chartType, setChartType] = useState<ChartType>('line');
   // No canvas is mounted while this is true, so the create effect must re-run when it
   // clears — hence its presence in that effect's dependency list.
   const lineUnavailable = stableOnly && chartType === 'line';
@@ -710,9 +719,10 @@ export function RealtimeChart({
               return (
                 <button
                   key={type}
-                  onClick={() => setChartType(type)}
+                  onClick={() => onChartTypeChange(type)}
                   disabled={unavailable}
-                  title={unavailable ? 'Not available while "Log distinct parts only" is on' : undefined}
+                  aria-keyshortcuts="H"
+                  title={unavailable ? 'Not available while "Log distinct parts only" is on' : 'Press H to switch'}
                   className={clsx(
                     'px-3 py-1 text-xs font-medium transition-colors',
                     chartType === type
@@ -772,7 +782,7 @@ export function RealtimeChart({
               distribution of their measured values.
             </p>
             <button
-              onClick={() => setChartType('histogram')}
+              onClick={() => onChartTypeChange('histogram')}
               className="rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-semibold text-fg transition-colors hover:brightness-125"
             >
               Show histogram

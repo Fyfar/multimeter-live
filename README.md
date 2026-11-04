@@ -36,6 +36,8 @@ account, no backend. Your data never leaves your machine.
 - **Desktop, tablet and phone.** The layout adapts to the screen.
 - **Installable and offline.** Install it like a native app; after the first visit it
   needs no network. Updates never interrupt a recording.
+- **Keyboard shortcuts.** `Space` starts or stops logging, `1`–`5` switch views, `H` flips the
+  chart between line and histogram, `?` lists them.
 - **Light and dark themes.**
 
 ## What you need
