@@ -234,11 +234,11 @@ const sameSample = (a: Sample, b: Sample, where: string) => {
 }
 
 // --- the chart's x-axis anchor across a preserve-log mode change --------------------
-// `app/page.tsx` derives the anchor as `tsAt(watermark - firstSeq)` — the oldest sample the
+// `CaptureEngine` derives the anchor as `tsAt(watermark - firstSeq)` — the oldest sample the
 // chart can see. The regression this pins: tracking a candidate DURING the batch instead
 // captured it against the pre-advance watermark, so a preserve-log mode change anchored the
-// axis to an old-unit sample and `setSessionStart(prev => prev ?? at)` then made it stick
-// for the rest of the session.
+// axis to an old-unit sample and the session-start latch then made it stick for the rest of
+// the session.
 {
   const store = new SampleStore();
   const anchorOf = (watermark: number): number | null => {

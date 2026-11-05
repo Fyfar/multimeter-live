@@ -19,10 +19,10 @@ import {
   displayUnit, normalizeReading, readingResolution, type Reading,
 } from '@/lib/parser';
 import { SampleStore } from '@/lib/samples';
-import { CaptureEngine, type RestoreResult, type SessionStats } from '@/lib/capture';
+import { CaptureEngine } from '@/lib/capture';
 import {
   exportVerdictsCsv, isSupportedMode, parseEntry,
-  type ToleranceMode, type VerdictRow,
+  type ToleranceMode,
 } from '@/lib/passfail';
 import { useSerial } from '@/lib/useSerial';
 import { useBle } from '@/lib/useBle';
@@ -195,39 +195,9 @@ export default function Home() {
   const [sheet, setSheet] = useState<NavId | 'connection' | null>(null);
   const closeSheet = useCallback(() => setSheet(null), []);
   const [current, setCurrent] = useState<Reading | null>(null);
-  // Whether `current` has been confirmed stable. The capture engine owns the run counter;
-  // this is its render-visible mirror, committed once per batch. Pass/Fail needs
-  // it because a resistance reading sweeps through intermediate values as the probe is
-  // lifted, and comparing those produces a spurious FAIL.
-  const [currentStable, setCurrentStable] = useState(false);
-  const [recording, setRecording] = useState(false);
   // Page state, not the chart's: the H shortcut changes it, and it survives a view switch.
   const [chartType, setChartType] = useState<ChartType>('line');
   const [showHelp, setShowHelp] = useState(false);
-  // Bumped once per batch when the batch changed anything the UI reads. The store is a ref,
-  // so nothing else tells React the numbers moved — this is the array identity that the two
-  // spread-copy buffers used to provide, stated as a value instead of implied by a copy.
-  const [sampleVersion, setSampleVersion] = useState(0);
-  // Where the chart, statistics and histogram start reading. Advanced instead of clearing the
-  // store when a mode change preserves the log, so the table and CSV keep rows the chart must
-  // not draw (the `settings` preserve-log-on-mode-change toggle). State, not just a ref: the
-  // chart's update effect keys off its dependency array and a ref never changes identity.
-  const [chartFromSeq, setChartFromSeq] = useState(0);
-  // Bumped whenever the chart's incremental tier is invalidated — a watermark advance, or a
-  // retention trim dropping a chunk out from under its oldest buckets.
-  const [chartEpoch, setChartEpoch] = useState(0);
-  // When the current session's first point arrived. The chart anchors its x-axis here
-  // while the session is younger than the selected window. Deliberately NOT derived from
-  // the store's oldest sample: it is trimmed, so that is a fact about retention,
-  // not about the session. Today retention covers the longest window and the two would
-  // agree — which is exactly why deriving it would be a trap, since shortening retention
-  // later would silently break the anchor instead of failing loudly.
-  const [sessionStart, setSessionStart] = useState<number | null>(null);
-  const [chartUnit, setChartUnit] = useState('');
-  // The raw SCALE token behind `chartUnit` ('OM'/'V'/'A'/'nF') — StatisticsPanel and the
-  // chart's y-axis need this, not the display string, so each value/tick can pick its own
-  // SI prefix and apply the capacitance nF->F correction themselves (lib/si.ts).
-  const [chartBaseUnit, setChartBaseUnit] = useState('');
   const [triggerArmed, setTriggerArmed] = useState(false);
   const [triggerThreshold, setTriggerThreshold] = useState('');
   // Pass/Fail entry, held as the operator's raw strings so SI forms survive typing
@@ -240,33 +210,28 @@ export default function Home() {
   // never judged. Cleared synchronously on a mode change.
   const [pfReferenceSettled, setPfReferenceSettled] = useState('');
   const [pfToleranceSettled, setPfToleranceSettled] = useState('');
-  // Render mirror of `engine.passFailRows`, committed once per batch.
-  const [passFailRows, setPassFailRows] = useState<VerdictRow[]>([]);
   // No-data warning: `noData` = connected-but-silent; `noDataDismissed` = OK'd for the
   // current outage (re-armed when it clears). `lastDataAtRef` is the detector's clock.
   const [noData, setNoData] = useState(false);
   const [noDataDismissed, setNoDataDismissed] = useState(false);
   const lastDataAtRef = useRef(0);
-  // Mirror of the engine's recorded resolution for render (histogram bin width + stat
-  // decimals); the engine is the loop-side source, this state is its render-safe copy per batch.
-  const [recordedResolution, setRecordedResolution] = useState<number | null>(null);
-  // Value the meter spent the most readings at — the histogram window center, so a
-  // brief outlier (short/disconnect) doesn't pull the window off the main reading.
-  const [dominantValue, setDominantValue] = useState<number | null>(null);
 
   // THE canonical dataset — single source of truth for the chart, the histogram, the
   // statistics, the Data Log table and the CSV. Every one of those is a projection of this
-  // store; none keeps a per-sample copy of its own (`filtered-data-source`). A ref, because
-  // it is mutated in the read loop; `sampleVersion` is what render depends on.
+  // store; none keeps a per-sample copy of its own (`filtered-data-source`).
   // Held in state with a lazy initializer rather than a ref: the instance never changes, so
   // this is one stable identity for the component's life and render never touches `.current`.
-  // It is mutated in place by the read loop; `sampleVersion` is what tells React so.
+  // It is mutated in place by the read loop; `ev.version` is what tells React so.
   const [store] = useState<SampleStore>(() => new SampleStore());
 
   // Everything the read loop reads and writes synchronously lives here, out of React; see
   // lib/capture.ts. Same lazy-initializer reasoning as the store above.
   const [engine] = useState<CaptureEngine>(() => new CaptureEngine(store));
-  const [sessionStats, setSessionStats] = useState<SessionStats | null>(null);
+  // Everything render reads from the engine, as one snapshot. `publish` after every engine call
+  // that can change it; an unchanged view is the same object, so React bails out.
+  // Plain state, not useSyncExternalStore: it lands in the same render as `setCurrent`.
+  const [ev, setEv] = useState(() => engine.view);
+  const publish = useCallback(() => setEv(engine.view), [engine]);
 
   // The durable copy of the session; see lib/sessionPersister.ts. Reads from the engine and store
   // behind the scenes — the page only feeds it `tick`/dirty marks and drives Restore/Discard.
@@ -345,11 +310,10 @@ export default function Home() {
     };
   }, []);
 
-  // The store is mutated in place, so `sampleVersion` is what re-renders this component; the
-  // reads themselves are plain and re-evaluate on every render.
-  void sampleVersion;
+  // Plain reads of the in-place store, re-evaluated on every render; `ev.version` is what
+  // re-renders when it moves.
   const sampleCount = store.count;
-  const hasRows = sampleCount > 0 || passFailRows.length > 0;
+  const hasRows = sampleCount > 0 || ev.passFailRows.length > 0;
 
   // Navigation is presentational only: it never touches logging, the trigger, or the port.
   // pushState (not location.hash =) so each view becomes its own history entry AND no
@@ -362,29 +326,17 @@ export default function Home() {
     }
   }, []);
 
-  // The React half of the engine's derived reset: the watermark it moved, the chart's
-  // invalidation, and every render mirror of what it zeroed.
-  const commitReset = useCallback(() => {
-    setChartFromSeq(engine.chartFromSeq);
-    setChartEpoch((e) => e + 1);
-    setSessionStats(null);
-    setSessionStart(null);
-    setRecordedResolution(null);
-    setDominantValue(null);
-  }, [engine]);
-
   // After `engine.flush()` outside `ingest`. The saved copy ends the session now, not at the next
   // 5 s tick.
   const commitFlush = useCallback(() => {
-    setSampleVersion((v) => v + 1);
-    commitReset();
+    publish();
     persister.requestFlush();
-  }, [commitReset, persister]);
+  }, [publish, persister]);
 
   const setRec = useCallback((v: boolean, manual = false) => {
     if (engine.setRecording(v, manual)) commitFlush();
-    setRecording(v);
-  }, [engine, commitFlush]);
+    else publish();
+  }, [engine, commitFlush, publish]);
 
   // Clear Data / Clear Log only ask; the confirm is the full session flush: the canonical store
   // AND every derived projection.
@@ -413,77 +365,30 @@ export default function Home() {
     setPfToleranceSettled('');
   }, []);
 
-  // Everything one batch changes in React state, committed once. Separate from `handleReadings` so
-  // a restore can hold batches and replay them here afterwards.
+  // One batch, committed once. Separate from `handleReadings` so a restore can hold batches and
+  // replay them here afterwards.
   const ingestBatch = useCallback(
     (readings: Reading[]) => {
       const r = engine.ingest(readings);
-
-      // Order matters: a reset's nulls must land before this batch's stats and session-start
-      // updater, or a cleared session keeps its old anchor and statistics.
-      if (r.unit !== null) {
-        // Display-only conversion: chartUnit feeds the trigger label; chartBaseUnit feeds
-        // the chart axis and statistics, which each derive their own display/SI prefix
-        // from the raw token. Neither touches the Reading's own raw unit.
-        setChartUnit(displayUnit(r.unit));
-        setChartBaseUnit(r.unit);
-      }
+      publish();
       if (r.modeReset) resetEntryFields();
-      if (r.reset) commitReset();
-      if (r.trimmed) setChartEpoch((e) => e + 1);
-
-      // Functional so it cannot race a reset earlier in this batch: that queues null first,
-      // so `prev` is null here and this stamps. Cheap to evaluate every batch, and a no-op
-      // once stamped.
-      if (r.sessionStart !== null) {
-        const at = r.sessionStart;
-        setSessionStart((prev) => prev ?? at);
-      }
-
-      if (r.touched) setSampleVersion((v) => v + 1);
-
-      if (r.rowsChanged) setPassFailRows(engine.passFailRows);
       // One tone per batch (its last verdict) — a batch spans ms, a part takes seconds.
       if (r.verdicts.length > 0 && verdictAudioRef.current) {
         const t = r.verdicts[r.verdicts.length - 1].verdict === 'PASS' ? PASS_TONE : FAIL_TONE;
         beeperRef.current?.beep(t.hz, t.ms);
       }
-
-      setCurrentStable(r.currentStable);
-
-      // Commit a trigger-driven recording transition once (no per-sample setState).
-      if (r.recordingChanged) setRecording(engine.recording);
-
-      if (r.stats !== null) setSessionStats(r.stats);
-
-      // Mirror the recorded resolution + dominant value to state. (Unchanged when
-      // nothing was logged this batch — e.g. logging stopped → React bails out.)
-      setRecordedResolution(r.recordedResolution);
-      setDominantValue(r.dominantValue);
-
       persister.tick(); // cheap; the write itself happens outside this call
     },
-    [engine, commitReset, resetEntryFields, persister],
+    [engine, publish, resetEntryFields, persister],
   );
 
-  // Everything a restore changed, committed once like a `BatchResult`.
-  const commitRestore = useCallback((res: RestoreResult) => {
-    setSampleVersion((v) => v + 1);
-    setChartFromSeq(res.chartFromSeq);
-    setChartEpoch((e) => e + 1);
-    setSessionStats(res.stats);
-    setSessionStart(res.sessionStart);
-    setRecordedResolution(res.recordedResolution);
-    setDominantValue(res.dominantValue);
-    setChartUnit(displayUnit(res.unit));
-    setChartBaseUnit(res.unit);
-    setPassFailRows(res.verdicts);
-    setRecording(false);
+  const afterRestore = useCallback(() => {
+    publish();
     resetEntryFields();
-  }, [resetEntryFields]);
+  }, [publish, resetEntryFields]);
 
   const { status: saveStatus, previous, historyRev, restore } =
-    useSessionPersistence(persister, hasRows, commitRestore, ingestBatch);
+    useSessionPersistence(persister, hasRows, afterRestore, ingestBatch);
   const feedReadings = restore.feed;
 
   const handleReadings = useCallback(
@@ -553,9 +458,9 @@ export default function Home() {
   // latch is deliberately left alone.
   const clearPassFail = useCallback(() => {
     engine.clearVerdicts();
-    setPassFailRows(engine.passFailRows);
+    publish();
     persister.requestFlush();
-  }, [engine, persister]);
+  }, [engine, publish, persister]);
 
   const { connect: serialConnect, clearError: clearSerialError } = serial;
   const { connect: bleConnect, clearError: clearBleError } = ble;
@@ -573,7 +478,7 @@ export default function Home() {
   }, [engine, setRec]);
   useShortcuts({
     view,
-    recording,
+    recording: ev.recording,
     connected: status === 'connected',
     toggleRecord: handleToggleRecord,
     goTo: (i) => navigate(NAV_IDS[i]),
@@ -587,16 +492,14 @@ export default function Home() {
     if (v) setRec(true);
   }, [setRec, updateSettings]);
 
-  // Per-row note edit: annotation only — never touches the reading or statistics. Keyed on
-  // `seq`, which survives retention trimming, so a note cannot migrate to another row. The
-  // version bump is load-bearing: the note input is controlled, and with the store in a ref
-  // nothing else would tell React to re-render it, so the operator would type into a field
-  // that never updates.
+  // Per-row note edit: annotation only — never touches the reading or statistics. The publish is
+  // load-bearing: the note input is controlled, so without the version bump the operator would
+  // type into a field that never updates.
   const handleNoteChange = useCallback((seq: number, note: string) => {
-    store.setNote(seq, note);
+    engine.setNote(seq, note);
     persister.markNotesDirty();
-    setSampleVersion((v) => v + 1);
-  }, [store, persister]);
+    publish();
+  }, [engine, persister, publish]);
 
   const exportCsv = useCallback(() => exportSamplesCsv(store), [store]);
 
@@ -611,9 +514,9 @@ export default function Home() {
   // legitimately exceed the retained window past seven days, and this is deliberately 0
   // after a preserve-log reset. Reading the store here would put two differently-valued
   // tiles labelled "Samples" on one screen.
-  const recordedCount = sessionStats?.count ?? 0;
+  const recordedCount = ev.stats?.count ?? 0;
   // What the Clear and Restore dialogs promise about the live session.
-  const keepLive = persister.willKeep({ count: sampleCount, verdicts: passFailRows.length, notes: store.noteCount });
+  const keepLive = persister.willKeep({ count: sampleCount, verdicts: ev.passFailRows.length, notes: store.noteCount });
   const canExport = sampleCount > 0;
   const { rangeInvalid, yMin: effectiveYMin, yMax: effectiveYMax } = resolveRange(autoScale, rangeMin, rangeMax);
   // Histogram bin width + stat decimals. With data present, use the frozen coarsest
@@ -626,16 +529,16 @@ export default function Home() {
   // gating on the store would resolve both to `undefined` and silently switch the histogram
   // off the LSD grid, switch off the ±20 LSD y-axis floor, and drop the Statistics panels'
   // resolution-derived decimals to their 3-decimal fallback.
-  const chartCount = Math.max(0, store.count - (chartFromSeq - store.firstSeq));
+  const chartCount = Math.max(0, store.count - (ev.chartFromSeq - store.firstSeq));
   const binWidth =
     chartCount > 0
-      ? (recordedResolution ?? undefined)
+      ? (ev.recordedResolution ?? undefined)
       : (liveNumeric ? (readingResolution(liveNumeric) ?? undefined) : undefined);
   // Histogram window center: the time-dominant recorded value when data is present
   // (outliers fall into under/over-range bins), else the live reading for preview.
   const centerValue =
     chartCount > 0
-      ? (dominantValue ?? undefined)
+      ? (ev.dominantValue ?? undefined)
       : (liveNumeric ? (normalizeReading(liveNumeric).baseValue ?? undefined) : undefined);
 
   return (
@@ -685,21 +588,21 @@ export default function Home() {
               <div className="flex flex-col gap-4">
                 <DigitalDisplay
                   reading={current}
-                  recording={recording}
+                  recording={ev.recording}
                   sampleCount={recordedCount}
                 />
                 <PanelStrip label="Controls" expanded={sheet === 'dashboard'} onOpen={() => setSheet('dashboard')}>
-                  <RecordButton recording={recording} canRecord={status === 'connected'} onToggle={handleToggleRecord} />
+                  <RecordButton recording={ev.recording} canRecord={status === 'connected'} onToggle={handleToggleRecord} />
                 </PanelStrip>
                 <RealtimeChart
                   store={store}
-                  sampleVersion={sampleVersion}
-                  chartFromSeq={chartFromSeq}
-                  chartEpoch={chartEpoch}
+                  sampleVersion={ev.version}
+                  chartFromSeq={ev.chartFromSeq}
+                  chartEpoch={ev.chartEpoch}
                   counts={engine.counts}
                   stableOnly={stableOnly}
-                  sessionStart={sessionStart}
-                  unit={chartBaseUnit}
+                  sessionStart={ev.sessionStart}
+                  unit={ev.unit}
                   yMin={effectiveYMin}
                   yMax={effectiveYMax}
                   timeRange={timeRange}
@@ -710,7 +613,7 @@ export default function Home() {
                   centerValue={centerValue}
                   theme={theme}
                 />
-                <StatisticsPanel stats={sessionStats} baseUnit={chartBaseUnit} resolution={binWidth} />
+                <StatisticsPanel stats={ev.stats} baseUnit={ev.unit} resolution={binWidth} />
               </div>
             </main>
 
@@ -728,8 +631,8 @@ export default function Home() {
               triggerArmed={triggerArmed}
               onTriggerArmedChange={setTriggerArmed}
               canArm={(toFinite(triggerThreshold) ?? 0) > 0 && status === 'connected'}
-              triggerUnit={chartUnit}
-              recording={recording}
+              triggerUnit={displayUnit(ev.unit)}
+              recording={ev.recording}
               onToggleRecord={handleToggleRecord}
               canRecord={status === 'connected'}
               stableOnly={stableOnly}
@@ -745,11 +648,11 @@ export default function Home() {
         ) : view === 'data-log' ? (
           <DataLog
             reading={current}
-            recording={recording}
+            recording={ev.recording}
             store={store}
-            sampleVersion={sampleVersion}
-            stats={sessionStats}
-            baseUnit={chartBaseUnit}
+            sampleVersion={ev.version}
+            stats={ev.stats}
+            baseUnit={ev.unit}
             resolution={binWidth}
             canRecord={status === 'connected'}
             onExportCsv={exportCsv}
@@ -763,7 +666,7 @@ export default function Home() {
         ) : view === 'pass-fail' ? (
           <PassFail
             reading={current}
-            stable={currentStable}
+            stable={ev.currentStable}
             mode={passFailMode}
             reference={pfReference}
             onReferenceChange={setPfReference}
@@ -773,7 +676,7 @@ export default function Home() {
             toleranceSettled={pfToleranceSettled}
             toleranceMode={pfToleranceMode}
             onToleranceModeChange={setPfToleranceMode}
-            rows={passFailRows}
+            rows={ev.passFailRows}
             onClear={clearPassFail}
             onExportCsv={exportVerdictCsv}
             panelOpen={sheet === 'pass-fail'}
@@ -804,7 +707,7 @@ export default function Home() {
       <SessionConfirm
         pending={restore.pending}
         samples={sampleCount}
-        verdictRows={passFailRows.length}
+        verdictRows={ev.passFailRows.length}
         keep={keepLive}
         onConfirm={restore.confirm}
         onCancel={restore.cancel}

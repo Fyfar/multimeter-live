@@ -1,7 +1,6 @@
 'use client';
 
 import { useCallback, useRef, useState } from 'react';
-import type { RestoreResult } from './capture';
 import type { Reading } from './parser';
 import type { SessionSummary } from './persist';
 import type { SessionPersister } from './sessionPersister';
@@ -16,13 +15,13 @@ export type PendingConfirm = {
 /**
  * The operator's side of Restore, from the notice or History: ask first when there are live rows
  * or the meter is in another mode, hold the meter's readings while the restore runs, then replay
- * them. `commit` applies a successful `RestoreResult` to React state; `ingest` is the page's
- * per-batch commit.
+ * them. `commit` publishes a successful restore to React state; `ingest` is the page's per-batch
+ * commit.
  */
 export function useRestoreFlow(
   persister: SessionPersister,
   hasRows: boolean,
-  commit: (result: RestoreResult) => void,
+  commit: () => void,
   ingest: (readings: Reading[]) => void,
 ) {
   const [restoring, setRestoring] = useState(false);
@@ -48,7 +47,7 @@ export function useRestoreFlow(
     setError(null);
     // Never left pending on a throw: `restoringRef` would then hold every later reading.
     const out = await persister.restore(target.id).catch((e: unknown) => ({ ok: false as const, reason: String(e) }));
-    if (out.ok) { commit(out.result); onRestored?.(); }
+    if (out.ok) { commit(); onRestored?.(); }
     else setError(out.reason);
     restoringRef.current = false;
     setRestoring(false);
