@@ -4,9 +4,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import { ChevronDown, Moon, Sun } from 'lucide-react';
 import { DigitalDisplay } from '@/components/DigitalDisplay';
-import { RealtimeChart, nextChartType, type ChartType, type Theme } from '@/components/RealtimeChart';
+import { RealtimeChart, nextChartType, type ChartType } from '@/components/RealtimeChart';
 import { Controls, PanelStrip, RecordButton } from '@/components/Controls';
-import { Sidebar, NAV_IDS, type NavId } from '@/components/Sidebar';
+import { Sidebar } from '@/components/Sidebar';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
 import { DataLog } from '@/components/DataLog';
 import { Settings } from '@/components/Settings';
@@ -20,45 +20,33 @@ import {
 } from '@/lib/parser';
 import { SampleStore } from '@/lib/samples';
 import { CaptureEngine } from '@/lib/capture';
-import {
-  exportVerdictsCsv, isSupportedMode, parseEntry,
-  type ToleranceMode,
-} from '@/lib/passfail';
+import { exportVerdictsCsv, isSupportedMode } from '@/lib/passfail';
 import { useSerial } from '@/lib/useSerial';
 import { useBle } from '@/lib/useBle';
 import { useShortcuts } from '@/lib/useShortcuts';
 import { useLiveTitle } from '@/lib/useLiveTitle';
 import { useSessionPersistence } from '@/lib/useSessionPersistence';
+import { usePersistedSettings } from '@/lib/usePersistedSettings';
+import { useTheme, type Theme } from '@/lib/useTheme';
+import { NAV_IDS, useNavigation } from '@/lib/useNavigation';
+import { useTriggerEntry } from '@/lib/useTriggerEntry';
+import { usePassFailEntry } from '@/lib/usePassFailEntry';
+import { useBeeper } from '@/lib/useBeeper';
+import { useNoDataAlarm } from '@/lib/useNoDataAlarm';
 import { SessionPersister, type SaveStatus } from '@/lib/sessionPersister';
 import { isBusy, type ConnectionStatus, type Transport } from '@/lib/connection';
-import {
-  DEFAULT_SETTINGS, loadSettings, saveSettings, type Settings as SettingValues,
-} from '@/lib/settings';
-import { createBeeper, type Beeper } from '@/lib/beep';
+import { toFinite } from '@/lib/settings';
 import { exportSamplesCsv } from '@/lib/csv';
 // App version — single source of truth is package.json "version". Bump it on every
 // change (see AGENTS.md "Versioning") so the footer reflects what's deployed.
 import { version as APP_VERSION } from '@/package.json';
 
-// Connected-but-silent threshold: if the port is connected but no reading has arrived
-// for this long, the no-data warning condition is active (the ZT703s streams
-// continuously, so 3 s of silence is clearly abnormal — meter off / lead broken).
-const NO_DATA_MS = 3000;
 // How long Clear waits for the session to be saved complete before clearing anyway.
 const CLEAR_SAVE_MS = 2000;
 // Pass/Fail verdict tones. Far apart in pitch AND length so they're told apart by ear
 // alone — the operator is looking at the parts, not the screen.
 const PASS_TONE = { hz: 1180, ms: 90 };
 const FAIL_TONE = { hz: 300, ms: 280 };
-// Quiet period before a Pass/Fail entry is final. Typing "10" passes through "1", and
-// judging that intermediate flashes FAIL at 1% on the way to 10%.
-const PF_INPUT_DEBOUNCE_MS = 350;
-
-const toFinite = (s: string): number | null => {
-  if (s === '') return null;
-  const n = Number.parseFloat(s);
-  return Number.isFinite(n) ? n : null;
-};
 
 // An inverted manual range (minimum at or above maximum) describes no window at all. Applying it
 // would hand Chart.js `min > max`, which silently renders an empty or upside-down axis — so it is
@@ -163,58 +151,17 @@ function AppHeader({ status, detail, saveStatus, theme, onToggleTheme, connectio
 }
 
 export default function Home() {
-  // Persisted settings. Start at defaults so the static-export HTML matches the first
-  // client render; a mount effect then hydrates from storage.
-  const [settings, setSettings] = useState<SettingValues>(DEFAULT_SETTINGS);
-  const updateSettings = useCallback(
-    (patch: Partial<SettingValues>) => setSettings((s) => ({ ...s, ...patch })),
-    [],
-  );
+  const { settings, updateSettings } = usePersistedSettings();
   const {
     baud, rangeMin, rangeMax, autoScale, timeRange, stableOnly, stabilityCount, hysteresisPct,
     preserveOnModeChange, noDataWarning, noDataAudio, capNoPartFloor, verdictAudio,
   } = settings;
-  // Starts 'dark' to match the static HTML; the mount effect reads what the pre-paint
-  // script in layout.tsx already applied, so storage is read only there.
-  const [theme, setTheme] = useState<Theme>('dark');
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot hydration
-    if (document.documentElement.dataset.theme === 'light') setTheme('light');
-  }, []);
-  const toggleTheme = useCallback(() => {
-    const next: Theme = theme === 'dark' ? 'light' : 'dark';
-    document.documentElement.dataset.theme = next;
-    try { window.localStorage.setItem('multimeter-live:theme', next); } catch { /* still applies this page */ }
-    setTheme(next);
-  }, [theme]);
-  // The active view. Stays 'dashboard' for the first render so it matches the statically
-  // exported HTML; the URL hash takes over in the mount effect below.
-  const [view, setView] = useState<NavId>('dashboard');
-  // The open drawer below lg: a view's own panel (open while it equals `view`, so any view
-  // change closes it) or the header's Connection card. One value, so only one is open.
-  const [sheet, setSheet] = useState<NavId | 'connection' | null>(null);
-  const closeSheet = useCallback(() => setSheet(null), []);
+  const { theme, toggleTheme } = useTheme();
+  const { view, sheet, openSheet, closeSheet, navigate } = useNavigation();
   const [current, setCurrent] = useState<Reading | null>(null);
   // Page state, not the chart's: the H shortcut changes it, and it survives a view switch.
   const [chartType, setChartType] = useState<ChartType>('line');
   const [showHelp, setShowHelp] = useState(false);
-  const [triggerArmed, setTriggerArmed] = useState(false);
-  const [triggerThreshold, setTriggerThreshold] = useState('');
-  // Pass/Fail entry, held as the operator's raw strings so SI forms survive typing
-  // (`4.5k` must not be mangled on its way through `4.`). Parsed on demand.
-  const [pfReference, setPfReference] = useState('');
-  const [pfTolerance, setPfTolerance] = useState('');
-  const [pfToleranceMode, setPfToleranceMode] = useState<ToleranceMode>('percent');
-  // Debounced mirrors of the two entry fields. The inputs stay live; everything
-  // downstream (echo, band, live verdict, capture) reads these, so a half-typed value is
-  // never judged. Cleared synchronously on a mode change.
-  const [pfReferenceSettled, setPfReferenceSettled] = useState('');
-  const [pfToleranceSettled, setPfToleranceSettled] = useState('');
-  // No-data warning: `noData` = connected-but-silent; `noDataDismissed` = OK'd for the
-  // current outage (re-armed when it clears). `lastDataAtRef` is the detector's clock.
-  const [noData, setNoData] = useState(false);
-  const [noDataDismissed, setNoDataDismissed] = useState(false);
-  const lastDataAtRef = useRef(0);
 
   // THE canonical dataset — single source of truth for the chart, the histogram, the
   // statistics, the Data Log table and the CSV. Every one of those is a projection of this
@@ -237,94 +184,22 @@ export default function Home() {
   // behind the scenes — the page only feeds it `tick`/dirty marks and drives Restore/Discard.
   const [persister] = useState<SessionPersister>(() => new SessionPersister(store, engine));
 
+  const trigger = useTriggerEntry(engine);
+  const passFail = usePassFailEntry(engine);
+  const beeper = useBeeper();
   const verdictAudioRef = useRef(verdictAudio);
-  // One beeper for the component's life; created client-side, disposed on unmount.
-  // Declared here rather than beside its effect because handleReadings (defined below)
-  // sounds verdict tones through it.
-  const beeperRef = useRef<Beeper | null>(null);
 
-  useEffect(() => { engine.setTriggerArmed(triggerArmed); }, [engine, triggerArmed]);
-  useEffect(() => { engine.setTriggerThreshold(toFinite(triggerThreshold)); }, [engine, triggerThreshold]);
   useEffect(() => {
     engine.configure({ stabilityCount, hysteresisPct, stableOnly, preserveOnModeChange, capNoPartFloor });
   }, [engine, stabilityCount, hysteresisPct, stableOnly, preserveOnModeChange, capNoPartFloor]);
   useEffect(() => { verdictAudioRef.current = verdictAudio; }, [verdictAudio]);
   // Pass/Fail captures, counts and sounds only on its own view; see setPassFailActive.
   useEffect(() => { engine.setPassFailActive(view === 'pass-fail'); }, [engine, view]);
-  // Debounce each field independently. The cleanup cancels the pending commit on every
-  // keystroke, so the value lands only once typing pauses.
-  useEffect(() => {
-    const id = setTimeout(() => setPfReferenceSettled(pfReference), PF_INPUT_DEBOUNCE_MS);
-    return () => clearTimeout(id);
-  }, [pfReference]);
-  useEffect(() => {
-    const id = setTimeout(() => setPfToleranceSettled(pfTolerance), PF_INPUT_DEBOUNCE_MS);
-    return () => clearTimeout(id);
-  }, [pfTolerance]);
-
-  useEffect(() => {
-    // Reads the SETTLED values, never the raw inputs.
-    const { ref, tol, band } = parseEntry(pfReferenceSettled, pfToleranceSettled, pfToleranceMode);
-    engine.setPassFailConfig(ref, tol, band, pfToleranceMode);
-  }, [engine, pfReferenceSettled, pfToleranceSettled, pfToleranceMode]);
-
-  // One-shot hydration from localStorage. setState-in-effect is intentional: the first
-  // render must use defaults to match the static-export HTML. Restoring is deliberately
-  // inert: no setting starts logging, arms the trigger, or opens a port.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional one-shot hydration
-    setSettings(loadSettings());
-  }, []);
-
-  // Persist on change. Skip the first invocation (mount, still defaults) so we don't
-  // clobber stored values before the hydration effect above has applied them.
-  const persistReadyRef = useRef(false);
-  useEffect(() => {
-    if (!persistReadyRef.current) { persistReadyRef.current = true; return; }
-    saveSettings(settings);
-  }, [settings]);
-
-  // The URL hash is the source of truth for the active view: it survives a reload, gives
-  // browser Back/Forward between views for free, and makes a view deep-linkable. Read only
-  // after mount — this page is statically exported and prerendered, so `location` does not
-  // exist at render time and reading it there would desync hydration.
-  useEffect(() => {
-    const fromHash = (): NavId => {
-      const id = window.location.hash.slice(1);
-      return (NAV_IDS as readonly string[]).includes(id) ? (id as NavId) : 'dashboard';
-    };
-    /* eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot hydration from the URL */
-    setView(fromHash());
-    // Back/Forward across pushState entries fires popstate; an edited address bar fires
-    // hashchange. Both resolve through the same validated read, so handling them twice is
-    // harmless and missing either is not.
-    const sync = () => {
-      setView(fromHash());
-      setSheet(null);
-    };
-    window.addEventListener('hashchange', sync);
-    window.addEventListener('popstate', sync);
-    return () => {
-      window.removeEventListener('hashchange', sync);
-      window.removeEventListener('popstate', sync);
-    };
-  }, []);
 
   // Plain reads of the in-place store, re-evaluated on every render; `ev.version` is what
   // re-renders when it moves.
   const sampleCount = store.count;
   const hasRows = sampleCount > 0 || ev.passFailRows.length > 0;
-
-  // Navigation is presentational only: it never touches logging, the trigger, or the port.
-  // pushState (not location.hash =) so each view becomes its own history entry AND no
-  // hashchange event fires — the listener above is left for Back/Forward and manual edits.
-  const navigate = useCallback((id: NavId) => {
-    setView(id);
-    setSheet(null);
-    if (window.location.hash.slice(1) !== id) {
-      window.history.pushState(null, '', `#${id}`);
-    }
-  }, []);
 
   // After `engine.flush()` outside `ingest`. The saved copy ends the session now, not at the next
   // 5 s tick.
@@ -356,14 +231,12 @@ export default function Home() {
 
   // The operator-typed trigger and Pass/Fail entry belong to the live session's mode: cleared on
   // a mode change and on a restore.
+  const { reset: resetTrigger } = trigger;
+  const { reset: resetPassFail } = passFail;
   const resetEntryFields = useCallback(() => {
-    setTriggerThreshold('');
-    setTriggerArmed(false);
-    setPfReference('');
-    setPfTolerance('');
-    setPfReferenceSettled('');
-    setPfToleranceSettled('');
-  }, []);
+    resetTrigger();
+    resetPassFail();
+  }, [resetTrigger, resetPassFail]);
 
   // One batch, committed once. Separate from `handleReadings` so a restore can hold batches and
   // replay them here afterwards.
@@ -375,11 +248,11 @@ export default function Home() {
       // One tone per batch (its last verdict) — a batch spans ms, a part takes seconds.
       if (r.verdicts.length > 0 && verdictAudioRef.current) {
         const t = r.verdicts[r.verdicts.length - 1].verdict === 'PASS' ? PASS_TONE : FAIL_TONE;
-        beeperRef.current?.beep(t.hz, t.ms);
+        beeper.current?.beep(t.hz, t.ms);
       }
       persister.tick(); // cheap; the write itself happens outside this call
     },
-    [engine, publish, resetEntryFields, persister],
+    [engine, publish, resetEntryFields, beeper, persister],
   );
 
   const afterRestore = useCallback(() => {
@@ -393,8 +266,6 @@ export default function Home() {
 
   const handleReadings = useCallback(
     (readings: Reading[]) => {
-      // Mark data as flowing — resets the no-data detector's silence clock.
-      lastDataAtRef.current = Date.now();
       setCurrent(readings[readings.length - 1]);
       feedReadings(readings);
     },
@@ -410,49 +281,8 @@ export default function Home() {
     if (status !== 'connected') setRec(false);
   }, [status, setRec]);
 
-  // No-data detector: while connected, poll for silence past NO_DATA_MS. Clock seeded on
-  // connect (catches a meter that never sends anything) and reset per batch.
-  useEffect(() => {
-    if (status !== 'connected') {
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear condition when not connected
-      setNoData(false);
-      return;
-    }
-    lastDataAtRef.current = Date.now();
-    const id = setInterval(() => {
-      setNoData(Date.now() - lastDataAtRef.current > NO_DATA_MS);
-    }, 750);
-    return () => clearInterval(id);
-  }, [status]);
-
-  // Re-arm per outage: once the condition clears (data resumed or disconnected), drop
-  // any prior dismissal so the next silence shows the warning again.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- re-arm dismissal on clear
-    if (!noData) setNoDataDismissed(false);
-  }, [noData]);
-
-  // Single source of truth for both the overlay and the audio: the warning is visible
-  // only while enabled, the condition holds, and it hasn't been dismissed this outage.
-  const overlayVisible = noDataWarning && noData && !noDataDismissed;
-
-  useLiveTitle(current, status === 'connected', noData);
-
-  useEffect(() => {
-    beeperRef.current = createBeeper();
-    return () => {
-      beeperRef.current?.dispose();
-      beeperRef.current = null;
-    };
-  }, []);
-  // Drive the audio from the same visibility flag, gated by the audio setting — so it
-  // can never sound without the overlay and stops on dismiss / data-resume / disconnect.
-  useEffect(() => {
-    const beeper = beeperRef.current;
-    if (!beeper) return;
-    if (overlayVisible && noDataAudio) beeper.start();
-    else beeper.stop();
-  }, [overlayVisible, noDataAudio]);
+  const noData = useNoDataAlarm({ status, current, enabled: noDataWarning, audio: noDataAudio, beeper });
+  useLiveTitle(current, status === 'connected', noData.noData);
 
   // Clears only the verdict batch; see `CaptureEngine.clearVerdicts` for why the capture
   // latch is deliberately left alone.
@@ -550,7 +380,7 @@ export default function Home() {
         theme={theme}
         onToggleTheme={toggleTheme}
         connectionOpen={sheet === 'connection'}
-        onOpenConnection={() => setSheet('connection')}
+        onOpenConnection={() => openSheet('connection')}
       />
 
       <SessionNotices
@@ -591,7 +421,7 @@ export default function Home() {
                   recording={ev.recording}
                   sampleCount={recordedCount}
                 />
-                <PanelStrip label="Controls" expanded={sheet === 'dashboard'} onOpen={() => setSheet('dashboard')}>
+                <PanelStrip label="Controls" expanded={sheet === 'dashboard'} onOpen={() => openSheet('dashboard')}>
                   <RecordButton recording={ev.recording} canRecord={status === 'connected'} onToggle={handleToggleRecord} />
                 </PanelStrip>
                 <RealtimeChart
@@ -626,11 +456,11 @@ export default function Home() {
               onRangeMaxChange={(v) => updateSettings({ rangeMax: v })}
               autoScale={autoScale}
               onAutoScaleChange={(v) => updateSettings({ autoScale: v })}
-              triggerThreshold={triggerThreshold}
-              onTriggerThresholdChange={setTriggerThreshold}
-              triggerArmed={triggerArmed}
-              onTriggerArmedChange={setTriggerArmed}
-              canArm={(toFinite(triggerThreshold) ?? 0) > 0 && status === 'connected'}
+              triggerThreshold={trigger.threshold}
+              onTriggerThresholdChange={trigger.setThreshold}
+              triggerArmed={trigger.armed}
+              onTriggerArmedChange={trigger.setArmed}
+              canArm={(toFinite(trigger.threshold) ?? 0) > 0 && status === 'connected'}
               triggerUnit={displayUnit(ev.unit)}
               recording={ev.recording}
               onToggleRecord={handleToggleRecord}
@@ -660,7 +490,7 @@ export default function Home() {
             onClear={requestClear}
             onNoteChange={handleNoteChange}
             panelOpen={sheet === 'data-log'}
-            onOpenPanel={() => setSheet('data-log')}
+            onOpenPanel={() => openSheet('data-log')}
             onClosePanel={closeSheet}
           />
         ) : view === 'pass-fail' ? (
@@ -668,19 +498,19 @@ export default function Home() {
             reading={current}
             stable={ev.currentStable}
             mode={passFailMode}
-            reference={pfReference}
-            onReferenceChange={setPfReference}
-            referenceSettled={pfReferenceSettled}
-            tolerance={pfTolerance}
-            onToleranceChange={setPfTolerance}
-            toleranceSettled={pfToleranceSettled}
-            toleranceMode={pfToleranceMode}
-            onToleranceModeChange={setPfToleranceMode}
+            reference={passFail.reference}
+            onReferenceChange={passFail.setReference}
+            referenceSettled={passFail.referenceSettled}
+            tolerance={passFail.tolerance}
+            onToleranceChange={passFail.setTolerance}
+            toleranceSettled={passFail.toleranceSettled}
+            toleranceMode={passFail.toleranceMode}
+            onToleranceModeChange={passFail.setToleranceMode}
             rows={ev.passFailRows}
             onClear={clearPassFail}
             onExportCsv={exportVerdictCsv}
             panelOpen={sheet === 'pass-fail'}
-            onOpenPanel={() => setSheet('pass-fail')}
+            onOpenPanel={() => openSheet('pass-fail')}
             onClosePanel={closeSheet}
           />
         ) : view === 'history' ? (
@@ -699,7 +529,7 @@ export default function Home() {
       </footer>
 
       {/* Connected-but-no-data warning — overlays every view; informational only. */}
-      {overlayVisible && <NoDataWarning transport={active} onDismiss={() => setNoDataDismissed(true)} />}
+      {noData.overlayVisible && <NoDataWarning transport={active} onDismiss={noData.dismiss} />}
       <ShortcutHelp open={showHelp} onClose={() => setShowHelp(false)} />
       {confirmClear && (
         <ClearConfirm samples={sampleCount} keep={keepLive} onConfirm={confirmFlush} onCancel={cancelClear} />

@@ -25,6 +25,7 @@ import { displayUnit, resolutionDecimals, STABLE_LSD_TOLERANCE } from '@/lib/par
 import { siAxisScale, toPhysicalUnit } from '@/lib/si';
 import { buildHistogram, type Entry } from '@/lib/histogram';
 import type { SampleStore } from '@/lib/samples';
+import type { Theme } from '@/lib/useTheme';
 import {
   DEFAULT_COLUMNS, RenderTier, quantizeAnchor, windowBucketMs, type TierPoint,
 } from '@/lib/tier';
@@ -76,8 +77,6 @@ const ALL_INITIAL_BUCKET_MS = 50;
  *  window that is still filling. Tick labels are whole seconds, so a span much under ~10 s
  *  repeats them ('-1s, -1s, Now, Now'). */
 const ALL_MIN_SPAN_MS = 10_000;
-
-export type Theme = 'dark' | 'light';
 
 // Canvas colors cannot follow the CSS tokens, so the neutrals are mirrored here per theme
 // (globals.css owns the source values). Dataset colors are semantic and never change.

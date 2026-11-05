@@ -121,6 +121,13 @@ export type Settings = {
   stableOnly: boolean;
 };
 
+// A free-text numeric field (range bound, trigger threshold): '' or junk is "unset".
+export const toFinite = (s: string): number | null => {
+  if (s === '') return null;
+  const n = Number.parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+};
+
 export const DEFAULT_SETTINGS: Settings = {
   stabilityCount: 2,
   hysteresisPct: 10,
