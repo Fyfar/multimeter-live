@@ -211,9 +211,8 @@ export class CaptureEngine {
   //
   // Deliberately does NOT touch `pfLastCaptured`: that guard is what stops a held
   // part from being captured twice, and it already re-arms itself on a genuine probe
-  // lift (baseValue null/no-part, in ingest). Resetting it here too used to re-capture
-  // (and re-beep) the SAME still-connected part the instant Clear Batch was pressed.
-  // Clear Batch is a table boundary, not a probe-lift.
+  // lift (baseValue null/no-part, in ingest). Resetting it here would re-capture and
+  // re-beep the part still on the probes. Clear Batch is a table boundary, not a probe-lift.
   clearVerdicts(): void {
     this.passFailRows = [];
     this.pfRowId = 0;
@@ -240,9 +239,8 @@ export class CaptureEngine {
   // while KEEPING the canonical samples — the "keep log on mode change" path. Those views
   // can't mix units; the per-row table/CSV can (each row carries its own mode/unit).
   //
-  // This is the ONE thing two parallel buffers were genuinely buying, and it costs one
-  // integer: the store is untouched and the chart simply starts reading later. Clearing the
-  // store here would take the operator's log with it.
+  // One integer, not a second buffer: the store is untouched and the chart simply starts
+  // reading later. Clearing the store here would take the operator's log with it.
   private resetDerived(): void {
     this.resetAccumulators();
     // Next unused seq: everything already stored belongs to the previous unit.
@@ -407,13 +405,11 @@ export class CaptureEngine {
     // loop discards already-collected samples on a mode change and on a trigger edge, and
     // a store appended per sample has no un-append.
     //
-    // Collapsing the old `newPoints`/`newRows` pair into one also repairs a live bug: the
-    // trigger branch below used to clear only `newPoints`, so a re-trigger mid-batch kept
-    // rows in the log whose chart points had been dropped — two consumers disagreeing, in
-    // the function whose comment claims their membership is identical by construction.
+    // One array, so a trigger edge discards chart and log samples together. With two, a
+    // re-trigger mid-batch kept log rows whose chart points had been dropped.
     const staged: { ts: number; value: number; mode: Mode; unit: string; decimals: number }[] = [];
     // Whether this batch changed anything the UI reads: a staged sample, or a retention
-    // trim that dropped one. Everything the UI reads now lives behind the same gate.
+    // trim that dropped one. Everything the UI reads lives behind this gate.
     let touched = false;
     const newVerdicts: VerdictRow[] = [];
 
@@ -483,8 +479,7 @@ export class CaptureEngine {
       // Trigger edges (evaluated before recording so the crossing sample is captured).
       const mag = baseValue !== null ? Math.abs(baseValue) : null;
       if (armed && threshold !== null && !this.recording && mag !== null && mag > threshold) {
-        // Clears EVERYTHING staged, chart and log alike. Previously only the chart half was
-        // dropped here; see the `staged` comment above.
+        // Clears EVERYTHING staged, chart and log alike.
         staged.length = 0;
         this.flush();
         reset = true;
@@ -503,8 +498,8 @@ export class CaptureEngine {
       const noPart = isCapacitanceStray(r.mode, baseValue, this.capNoPartFloor);
 
       // Stable-run tracking runs regardless of the recording session, because Pass/Fail
-      // capture has no session of its own (its batch boundary is Clear). Behavior-
-      // preserving for the Data Log: every path that STARTS recording resets these
+      // capture has no session of its own (its batch boundary is Clear). Harmless for
+      // the Data Log: every path that STARTS recording resets these
       // first, so anything accumulated while idle is wiped when recording begins.
       if (baseValue === null || noPart) {
         // OL (and a capacitance no-part reading) are excluded from the filtered
@@ -576,12 +571,10 @@ export class CaptureEngine {
 
           if (logSample) {
             // Everything recorded is behind this one gate, deliberately: the store, the
-            // histogram counts, the recorded resolution and the statistics. The counts sat
-            // outside it once, counting every reading regardless of the filter, so the
-            // histogram grew three times a second while the Samples tile stayed at the number
-            // of recorded entries — two readouts of the same session disagreeing by orders
-            // of magnitude. Hoisting any of it to the `recording` level one scope out would
-            // silently disable "Stable values only" for that consumer.
+            // histogram counts, the recorded resolution and the statistics. Hoisting any of
+            // it one scope out bypasses "Stable values only" for that consumer: hoisted
+            // counts would grow the histogram three times a second while the Samples tile
+            // counts recorded entries.
             staged.push({
               ts: r.ts,
               value: baseValue,

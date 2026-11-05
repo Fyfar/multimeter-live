@@ -244,7 +244,7 @@ export class RenderTier {
 
   /**
    * The extent of every occupied column, unclamped. The y-axis floor needs this and would
-   * otherwise rescan the visible samples — the single largest per-update cost this replaces.
+   * otherwise rescan the visible samples, the largest per-update cost.
    * Returns `null` when the tier is empty.
    */
   extent(): { min: number; max: number } | null {

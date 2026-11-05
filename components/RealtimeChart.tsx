@@ -174,15 +174,13 @@ function buildChartConfig(
   }
 
   // Line: a LINEAR time x-axis (ms timestamps as {x,y}) with parsing disabled. The
-  // linear axis pins points to absolute positions, which is what fixed the phantom
-  // *moving* spikes on the old category axis.
+  // linear axis pins points to absolute positions; a category axis makes spikes appear to
+  // move.
   //
-  // Chart.js's `decimation` plugin is gone — no longer imported, registered or enabled. It
-  // engaged when this was handed the raw buffer (~10,800 points at '1h'), but `RenderTier`
-  // reduces to at most 2 x DEFAULT_COLUMNS points in every mode, far below the plugin's
-  // 4x-canvas-width activation threshold, so it could never fire again. The same `min-max`
-  // guarantee it provided is now the tier's, asserted in scripts/check-tier.mts rather than
-  // trusted to a plugin.
+  // Don't add Chart.js's `decimation` plugin: `RenderTier` reduces to at most
+  // 2 x DEFAULT_COLUMNS points in every mode, far below its 4x-canvas-width activation
+  // threshold, so it never fires. The tier gives the `min-max` guarantee, asserted in
+  // scripts/check-tier.mts.
   return {
     type: 'line',
     data: {
@@ -193,11 +191,11 @@ function buildChartConfig(
           borderColor: '#3b82f6',
           backgroundColor: 'rgba(59,130,246,0.07)',
           borderWidth: 2,
-          // Static, deliberately. These were scriptable (reading ctx.raw.oor per point) and
-          // that cost ~2 KB of allocation PER POINT PER FRAME — 64% of everything the page
-          // allocated — because Chart.js builds a resolver context and a proxy for every
-          // element on every draw whenever any option is a function. The out-of-range
-          // markers now live in their own dataset below, so neither dataset needs one.
+          // Static, deliberately. Scriptable ones (reading ctx.raw.oor per point) cost ~2 KB
+          // of allocation PER POINT PER FRAME — 64% of everything the page allocated —
+          // because Chart.js builds a resolver context and a proxy for every element on
+          // every draw whenever any option is a function. The out-of-range markers live in
+          // their own dataset below, so neither dataset needs one.
           pointRadius: 0,
           pointBackgroundColor: '#3b82f6',
           pointBorderColor: '#3b82f6',
@@ -239,7 +237,6 @@ function buildChartConfig(
           label: 'out of range',
           // Chart.js draws datasets in REVERSE of (order, index), so with both at the
           // default order 0 this dataset paints first and the line paints over it. The
-          // markers were dataset-0 points before this split and sat on top; worse, the
           // out-of-range value is CLAMPED to the range bound, so every marker lies exactly
           // on the line's path and the 2px stroke bisects it instead of missing it.
           // order -1 sorts this dataset first, so it is drawn last.

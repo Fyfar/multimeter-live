@@ -4,7 +4,7 @@
 // are silent when wrong and cannot be checked by looking at the screen.
 //
 // Columnar by necessity, not by taste. A sample is five scalars (19 B); the same sample as
-// two objects across a chart buffer and a row buffer was 256 B. At the meter's measured 3.03
+// two objects across a chart buffer and a row buffer is 256 B. At the meter's measured 3.03
 // samples/second that is the difference between 35 MB and 469 MB over a seven-day session.
 // The other reason is persistence: cloning typed arrays is a memcpy, cloning 1.8 M objects is
 // an object-graph walk, which is what makes saving and restoring a session practical at all.
@@ -42,8 +42,8 @@ export const UNITS: readonly string[] = Object.freeze(['', ...Object.keys(SCALE)
 
 /**
  * How long captured samples are kept. Time, not a sample count: the retained span must not
- * depend on the meter's packet rate (the count-based cap this replaces covered 20 minutes at
- * this meter's 3/s while claiming an hour).
+ * depend on the meter's packet rate (a count cap sized for an hour covers 20 minutes at this
+ * meter's 3/s).
  *
  * 7 days x 86,400 s x 3.03 samples/s = ~1,832,544 samples. At 19 B/sample that is ~35 MB in
  * 112 chunks. Samples leave a whole chunk at a time (see `trim`), so the retained span is

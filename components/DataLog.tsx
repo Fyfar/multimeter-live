@@ -15,7 +15,7 @@ import { Drawer } from '@/components/Drawer';
  * Exactly what one rendered row needs, as SCALARS. Deliberately not the store's `Sample`
  * object: `Row` is memoized on prop identity, and `store.at(i)` returns a fresh object on
  * every call, so passing it would defeat the memo and re-render every visible row three
- * times a second — worse than before the store existed.
+ * times a second.
  */
 type RowData = {
   seq: number;

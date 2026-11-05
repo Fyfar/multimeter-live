@@ -11,8 +11,8 @@ import { clearPortRecord, loadPortRecord, savePortRecord } from './settings';
 // CALIBRATION KNOB — bench-derived, not arbitrary. Measured against a ZT703s on a CP2102:
 // a live port takes ~1 s to its first PARSED reading, because the parser emits nothing
 // until a second packet delimits the first (docs/hardware.md). 2500 is ~2.5x that, which
-// is the margin, not slack: an earlier 1200 was only ~20% over the measured latency and
-// would have intermittently rejected the real port and fallen through to disconnected.
+// is the margin, not slack: 1200 (~20% over the measured latency) intermittently rejected
+// the real port and fell through to disconnected.
 //
 // The upper bound is only how long a WRONG candidate stalls the reconnect before the next
 // is tried. It is deliberately NOT bounded by the 3 s no-data threshold: the probe holds
