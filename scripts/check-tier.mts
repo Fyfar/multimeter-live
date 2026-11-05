@@ -12,8 +12,9 @@
 
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_COLUMNS, RenderTier, quantizeAnchor, windowBucketMs, type TierPoint,
+  DEFAULT_COLUMNS, RenderTier, feedTier, newTierFeed, quantizeAnchor, windowBucketMs, type TierPoint,
 } from '../lib/tier.ts';
+import { CHUNK, SampleStore } from '../lib/samples.ts';
 
 let checks = 0;
 
@@ -537,6 +538,124 @@ function makeSamples(n: number, t0: number, stepMs: number): S[] {
     assert.ok(tier.bucketMs >= 1000, `${n} samples: columns widened rather than overflowed`);
   }
   checks += 3;
+}
+
+// --- 6. feedTier: an incrementally fed tier equals a fresh rebuild -------------------
+// The chart keeps one tier and one feed across updates; any stale-cache bug shows here as
+// a difference from a tier built once from the final store.
+{
+  const ALL = Infinity;
+  let clock = 1_000_000;
+  const append = (store: SampleStore, n: number, v: (i: number) => number = (i) => 1000 + Math.sin(i / 7) * 50, step = 330) => {
+    for (let i = 0; i < n; i++) { store.append(clock, v(store.firstSeq + store.count), 'RESISTANCE', 'OM', 3); clock += step; }
+  };
+  type At = Parameters<typeof feedTier>[3];
+  const at = (store: SampleStore, o: Partial<At> = {}): At =>
+    ({ chartFromSeq: store.firstSeq, chartEpoch: 0, windowMs: ALL, now: clock, ...o });
+  const rebuilt = (store: SampleStore, a: At) => { const t = new RenderTier(); feedTier(t, newTierFeed(), store, a); return t.points(); };
+  const same = (a: unknown, b: unknown, m: string) => { assert.deepEqual(a, b, m); checks++; };
+
+  // 'all' across appends of varying size, through several doublings
+  const store = new SampleStore();
+  const tier = new RenderTier();
+  const feed = newTierFeed();
+  for (const n of [1, 7, 300, 2, 1500, 40, 5000]) {
+    append(store, n);
+    feedTier(tier, feed, store, at(store));
+  }
+  assert.ok(tier.bucketMs > 50, 'precondition: the session outgrew the initial column width');
+  same(tier.points(), rebuilt(store, at(store)), "'all' fed in 7 appends == one rebuild");
+
+  // a trim with an epoch bump: the dropped columns must not survive
+  {
+    const s = new SampleStore();
+    const t = new RenderTier();
+    const f = newTierFeed();
+    const stale = new RenderTier();
+    const staleFeed = newTierFeed();
+    append(s, CHUNK + 500);
+    const wm = s.firstSeq;
+    feedTier(t, f, s, at(s, { chartFromSeq: wm }));
+    feedTier(stale, staleFeed, s, at(s, { chartFromSeq: wm }));
+    assert.ok(s.trim(s.tsAt(CHUNK)), 'precondition: the head chunk was trimmed');
+    append(s, CHUNK);
+    const a = at(s, { chartFromSeq: wm, chartEpoch: 1 });
+    feedTier(t, f, s, a);
+    feedTier(stale, staleFeed, s, { ...a, chartEpoch: 0 });
+    same(t.points(), rebuilt(s, a), 'an epoch bump rebuilds');
+    same(t.points()[0].x >= s.tsAt(0), true, 'nothing older than the store is drawn');
+    assert.notDeepEqual(stale.points(), t.points(), 'control: without the bump the trimmed columns survive');
+    checks++;
+  }
+
+  // a trim with NO epoch bump leaves fedTo past the store: the defensive rebuild
+  {
+    const s = new SampleStore();
+    const t = new RenderTier();
+    const f = newTierFeed();
+    append(s, CHUNK + 500);
+    const wm = s.firstSeq;
+    feedTier(t, f, s, at(s, { chartFromSeq: wm }));
+    s.trim(s.tsAt(CHUNK));
+    feedTier(t, f, s, at(s, { chartFromSeq: wm }));
+    same(t.points(), rebuilt(s, at(s, { chartFromSeq: wm })), 'fedTo > count rebuilds without an epoch bump');
+  }
+
+  // a watermark advance (preserve-log mode change): no pre-watermark rows in the trace
+  {
+    const s = new SampleStore();
+    const t = new RenderTier();
+    const f = newTierFeed();
+    append(s, 400, () => 4700);
+    feedTier(t, f, s, at(s));
+    const wm = s.firstSeq + s.count;
+    append(s, 400, () => 0.65);
+    feedTier(t, f, s, at(s, { chartFromSeq: wm }));
+    same(t.points(), rebuilt(s, at(s, { chartFromSeq: wm })), 'a watermark move rebuilds');
+    same(t.points().some((p) => p.y === 4700), false, 'no old-unit row survives in the trace');
+  }
+
+  // bounded -> 'all' rebuilds; 'all' -> bounded -> 'all' again, still equal
+  {
+    const s = new SampleStore();
+    const t = new RenderTier();
+    const f = newTierFeed();
+    append(s, 2000);
+    feedTier(t, f, s, at(s, { windowMs: 10_000 }));
+    feedTier(t, f, s, at(s));
+    same(t.points(), rebuilt(s, at(s)), "bounded -> 'all' rebuilds");
+    append(s, 300);
+    feedTier(t, f, s, at(s, { windowMs: 60_000 }));
+    append(s, 300);
+    feedTier(t, f, s, at(s));
+    same(t.points(), rebuilt(s, at(s)), "'all' -> bounded -> 'all' rebuilds again");
+  }
+
+  // a bounded window enters from the left edge: exactly one sample before t0, never before `from`
+  {
+    const s = new SampleStore();
+    append(s, 20, (i) => i, 4000); // sparse: one sample every 4 s
+    const now = clock;
+    const windowMs = 10_000;
+    const t0 = quantizeAnchor(now - windowMs, windowBucketMs(windowMs));
+    const before = s.indexAtOrAfter(t0) - 1;
+    const t = new RenderTier();
+    feedTier(t, newTierFeed(), s, at(s, { windowMs, now }));
+    const early = t.points().filter((p) => p.x < t0);
+    same(early.map((p) => p.x), [s.tsAt(before)], 'exactly the one sample before t0');
+    feedTier(t, newTierFeed(), s, at(s, { windowMs, now, chartFromSeq: s.firstSeq + before + 1 }));
+    same(t.points().filter((p) => p.x < t0).length, 0, 'never a sample before the watermark');
+  }
+
+  // an empty store: empty tier, finite anchor, 'all' anchored at now
+  {
+    const s = new SampleStore();
+    const t = new RenderTier();
+    feedTier(t, newTierFeed(), s, at(s, { windowMs: 10_000, now: 5_000_000 }));
+    same([t.points(), Number.isFinite(t.t0)], [[], true], 'empty store, bounded: empty tier, finite t0');
+    feedTier(t, newTierFeed(), s, at(s, { now: 5_000_000 }));
+    same([t.points(), t.t0], [[], 5_000_000], "empty store, 'all': empty tier anchored at now");
+  }
 }
 
 console.log(`check-tier: ${checks} assertions passed`);
