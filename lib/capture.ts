@@ -12,7 +12,7 @@ import {
 } from './parser.ts';
 import { RETENTION_MS, type SampleStore } from './samples.ts';
 import {
-  ENTRY_UNITS, entryToBase, isSupportedMode, judge,
+  canJudge, isCapacitanceStray, partUnderProbes, verdictFor,
   type ToleranceMode, type VerdictRow,
 } from './passfail.ts';
 import { DEFAULT_SETTINGS, type Settings } from './settings.ts';
@@ -498,13 +498,9 @@ export class CaptureEngine {
         recordingChanged = true;
       }
 
-      // Capacitance has no OL on lifted probes — it reads lead stray capacitance (pF),
-      // which is numeric, so without this it appends a junk near-zero row on every probe
-      // lift and never clears the last-logged reference. A floor of 0 disables it.
-      const noPart =
-        baseValue !== null &&
-        r.mode === 'CAPACITANCE' &&
-        Math.abs(baseValue) < this.capNoPartFloor;
+      // A capacitance stray would otherwise append a junk row on every probe lift and never
+      // clear the last-logged reference.
+      const noPart = isCapacitanceStray(r.mode, baseValue, this.capNoPartFloor);
 
       // Stable-run tracking runs regardless of the recording session, because Pass/Fail
       // capture has no session of its own (its batch boundary is Clear). Behavior-
@@ -536,25 +532,13 @@ export class CaptureEngine {
         const stable = this.stableRun >= this.stabilityCount;
 
         // ---- Pass/Fail capture (independent of the recording session; Pass/Fail view only)
-        // An exact zero means nothing is connected, not a part measuring zero: with the
-        // probes floating the meter settles on 0 in every supported mode, and a real
-        // component never reads a clean 0 (a 0R link still shows lead resistance).
-        // Scoped to Pass/Fail — the Data Log records a genuine 0 as a real measurement.
-        const pfRefEntry = this.pfRefEntry;
-        const pfBandEntry = this.pfBandEntry;
-        if (baseValue === 0) {
+        // Here only an exact zero can fail `partUnderProbes` (OL and strays took the branch
+        // above); it re-arms the latch without resetting the run.
+        if (!partUnderProbes(r.mode, baseValue, this.capNoPartFloor)) {
           this.pfLastCaptured = null;
         } else if (
           this.passFailActive &&
-          stable &&
-          pfRefEntry !== null &&
-          pfBandEntry !== null &&
-          isSupportedMode(r.mode) &&
-          // Guards a stale reference being judged in the wrong unit: the mode-change
-          // reset is gated on `baseUnit !== ''`, so an unrecognized unit string
-          // (documented as possible above nF) skips it and leaves the old reference
-          // live while r.mode has already changed.
-          baseUnit === ENTRY_UNITS[r.mode].baseUnit
+          canJudge(r.mode, baseUnit, stable, this.pfRefEntry, this.pfBandEntry)
         ) {
           const last = this.pfLastCaptured;
           // Gated on the stable run, same flag the live verdict uses (via currentStable),
@@ -564,21 +548,15 @@ export class CaptureEngine {
           // within one held part; a probe lift clears the reference for the next.
           if (isMajorChange(baseValue, last)) {
             this.pfLastCaptured = baseValue;
-            const toBase = ENTRY_UNITS[r.mode].toBase;
-            const baseReference = entryToBase(r.mode, pfRefEntry);
-            const baseBand = pfBandEntry * toBase;
             newVerdicts.push({
               id: this.pfRowId++,
               ts: r.ts,
               iso: localIso(r.ts),
               mode: r.mode,
               baseValue,
-              baseReference,
-              baseBand,
+              ...verdictFor(r.mode, baseValue, this.pfRefEntry!, this.pfBandEntry!),
               toleranceMode: this.pfToleranceMode,
               toleranceValue: this.pfToleranceValue!,
-              verdict: judge(baseValue, baseReference, baseBand),
-              deviation: baseValue - baseReference,
               resolution: lsd,
               unit: r.unit,
               decimals: displayDecimals(r.display),

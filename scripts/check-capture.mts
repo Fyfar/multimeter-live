@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { CaptureEngine, type CaptureSettings, type EngineView } from '../lib/capture.ts';
 import { SampleStore, CHUNK, MODES, RETENTION_MS } from '../lib/samples.ts';
-import { resolveBand } from '../lib/passfail.ts';
+import { isSupportedMode, livePassFail, parseEntry, resolveBand } from '../lib/passfail.ts';
 import type { Mode, Reading } from '../lib/parser.ts';
 
 let checks = 0;
@@ -141,6 +141,44 @@ const tenKOnView = () => {
   e.setPassFailConfig(1, 5, resolveBand(1, 5, 'percent'), 'percent');
   e.ingest(times(3, () => rd('VOLTAGE', '1.000', 'V')));
   eq(e.passFailRows.length, 0, 'unsupported mode captures nothing');
+}
+
+// --- parity: the live panel judges exactly what the engine captures ---------------------
+// The view and the engine share one rule; this is what fails if either grows its own copy.
+{
+  const { e } = fresh();
+  const entry = { RESISTANCE: ['4k7', '1'], CAPACITANCE: ['100n', '10'] } as const;
+  type M = keyof typeof entry;
+  const configure = (m: M) => {
+    const { ref, tol, band } = parseEntry(entry[m][0], entry[m][1], 'percent');
+    e.setPassFailConfig(ref, tol, band, 'percent');
+  };
+  const C = (d: string) => rd('CAPACITANCE', d, 'nF');
+  const noPart = new Set<Reading>();
+  const none = (r: Reading) => { noPart.add(r); return r; };
+  const seq = [
+    R('4.700'), R('4.700'), OL(), R('4.800'), R('4.800'), OL(), R('4.747'), R('4.747'),
+    none(rd('RESISTANCE', '0.000', 'KOM')), R('4.652'), R('4.652'),
+    C('100.0'), C('100.0'), none(C('0.002')), C('108.0'), C('108.0'), none(C('0.002')), C('120.0'), C('120.0'),
+  ];
+  configure('RESISTANCE');
+  e.ingest([R('4.700')]);
+  const captured: string[] = [];
+  for (const r of seq) {
+    const res = e.ingest([r]);
+    if (res.modeReset) configure(r.mode as M);
+    const [ref, tol] = entry[r.mode as M];
+    const lv = livePassFail({
+      reading: r, stable: true, mode: isSupportedMode(r.mode) ? r.mode : null,
+      capNoPartFloor: BASE.capNoPartFloor, referenceSettled: ref, toleranceSettled: tol, toleranceMode: 'percent',
+    });
+    for (const v of res.verdicts) {
+      captured.push(v.verdict);
+      eq([lv.verdict, lv.deviation], [v.verdict, v.deviation], `live verdict == captured row at ${r.display} ${r.unit}`);
+    }
+    if (noPart.has(r)) eq([res.verdicts.length, lv.status], [0, 'no-part'], `${r.display} ${r.unit}: no row, and "no part" live`);
+  }
+  eq(captured, ['PASS', 'FAIL', 'PASS', 'FAIL', 'PASS', 'PASS', 'FAIL'], 'parity sequence captured the expected rows');
 }
 
 // --- Pass/Fail works only on its own view -------------------------------------------

@@ -498,6 +498,7 @@ export default function Home() {
             reading={current}
             stable={ev.currentStable}
             mode={passFailMode}
+            capNoPartFloor={capNoPartFloor}
             reference={passFail.reference}
             onReferenceChange={passFail.setReference}
             referenceSettled={passFail.referenceSettled}
