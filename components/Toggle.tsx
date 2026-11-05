@@ -15,7 +15,7 @@ export function Toggle({
 }) {
   // The button is a transparent hit area around the track: the coarse-pointer rule in
   // globals.css gives buttons a 44px min-height, which would stretch a button that WAS the
-  // track. At a fine pointer the button is exactly the track's size, as before.
+  // track. At a fine pointer the button is exactly the track's size.
   return (
     <button
       role="switch"

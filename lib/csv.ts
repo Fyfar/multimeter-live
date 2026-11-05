@@ -80,8 +80,8 @@ export const SAMPLE_CSV_HEADER = 'Timestamp,Mode,Value,Unit,Notes';
 /**
  * The Data Log export's rows, for the live session and for one read back from History alike.
  * Recorded values only (OL is excluded upstream). The value is reconstructed in the unit the
- * meter reported, from the stored base value and digit count, so the file is unchanged from
- * before the store existed, including mixed mV/V rows from auto-ranging. `toFixed`, never
+ * meter reported, from the stored base value and digit count, so each row reads as the meter
+ * sent it, including mixed mV/V rows from auto-ranging. `toFixed`, never
  * `String`: `0.1450` at 0.1 mV resolution is a different measurement from `0.145` at 1 mV.
  */
 export function* sampleCsvLines(store: SampleStore): Generator<string> {

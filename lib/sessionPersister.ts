@@ -6,7 +6,7 @@
 // and nothing runs inside `ingest`. The page calls `tick()` once per batch, which only reads the
 // clock.
 
-import type { CaptureEngine, RestoreResult } from './capture';
+import type { CaptureEngine } from './capture';
 import type { VerdictRow } from './passfail';
 import {
   adoptedMark, assembleSession, endSession, isKeepable, planFlush, planLoad,
@@ -42,7 +42,7 @@ export interface PersistSnapshot {
   historyRev: number;
 }
 
-export type RestoreOutcome = { ok: true; result: RestoreResult } | { ok: false; reason: string };
+export type RestoreOutcome = { ok: true } | { ok: false; reason: string };
 
 const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
   new Promise((resolve, reject) => {
@@ -392,7 +392,6 @@ export class SessionPersister {
       if (this.isLive(id)) return { ok: false, reason: 'it is already the current session' };
       await this.flush();
       let target: SessionSummary;
-      let result: RestoreResult;
       let remapped: boolean;
       try {
         const stored = await withTimeout(db.read(id), RESTORE_TIMEOUT_MS);
@@ -400,7 +399,7 @@ export class SessionPersister {
         target = stored.summary;
         const a = assembleSession(stored.summary, stored.segments, stored.notes, stored.verdicts);
         remapped = this.store.load(a.loadable);
-        result = this.engine.restore({ ...a.context, verdicts: a.verdicts });
+        this.engine.restore({ ...a.context, verdicts: a.verdicts });
       } catch (e) {
         return { ok: false, reason: reasonOf(e) };
       }
@@ -424,7 +423,7 @@ export class SessionPersister {
         this.orphans = replaced;
         this.historyChanged({ previous, status: { kind: 'failed' } });
       }
-      return { ok: true, result };
+      return { ok: true };
     });
   }
 

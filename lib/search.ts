@@ -85,9 +85,9 @@ export const localIso = (ts: number): string => {
 /**
  * `localIso` caching the per-second head and offset — ~3 samples share a wall-clock second,
  * so the `Date` work drops to a third. Returns exactly `localIso(ts)` for every `ts`;
- * `check-search.mts` asserts that equality, because two silent bugs lived here:
+ * `check-search.mts` asserts that equality against two silent bugs:
  *
- *  - `ts % 1000` keeps the dividend's sign, so a pre-1970 row built `…59.00-1`.
+ *  - `ts % 1000` keeps the dividend's sign, so a pre-1970 row builds `…59.00-1`.
  *    `ts - sec * 1000` is always in [0, 1000) since `sec` is a floor.
  *  - `-1` as the "nothing cached" sentinel collides with a real second (the last before the
  *    epoch), reusing a stale prefix. `NaN` cannot collide.

@@ -6,10 +6,9 @@ import { clsx } from 'clsx';
 import { ActionButton, PanelStrip } from '@/components/Controls';
 import { Drawer } from '@/components/Drawer';
 import { StatisticsPanel } from '@/components/StatisticsPanel';
-import { normalizeReading, readingResolution, type Reading } from '@/lib/parser';
+import type { Reading } from '@/lib/parser';
 import {
-  ENTRY_UNITS, entryToBase, formatEntryValue, isBandTooWide, isPlausibleReference,
-  judge, parseEntry, summarizeBatch,
+  ENTRY_UNITS, formatEntryValue, livePassFail, summarizeBatch,
   type SupportedMode, type ToleranceMode, type VerdictRow,
 } from '@/lib/passfail';
 import { formatSiValue, siPrefixOf } from '@/lib/si';
@@ -36,6 +35,13 @@ const fmtDeviation = (baseUnit: string, dev: number, lsd: number | null): string
   const d = lsd ? Math.round(dev / lsd) * lsd : dev;
   return `${d >= 0 ? '+' : '\u2212'}${fmtMeasured(baseUnit, Math.abs(d), lsd)}`;
 };
+
+const STATUS_TEXT = {
+  measuring: 'Measuring…',
+  'no-part': 'No part connected',
+  'no-reference': 'Enter a reference and tolerance to compare',
+  settling: 'Settling…',
+} as const;
 
 function Th({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
@@ -163,6 +169,7 @@ export function PassFail({
   reading,
   stable,
   mode,
+  capNoPartFloor,
   reference,
   onReferenceChange,
   referenceSettled,
@@ -181,6 +188,7 @@ export function PassFail({
   reading: Reading | null;
   stable: boolean;
   mode: SupportedMode | null;
+  capNoPartFloor: number;
   /** Live input value — drives the field only. */
   reference: string;
   onReferenceChange: (v: string) => void;
@@ -200,52 +208,19 @@ export function PassFail({
 }) {
   const entryUnit = mode ? ENTRY_UNITS[mode].label : '';
 
-  // Parsed on read, not on keystroke (see EntryField).
-  // Everything below reads the SETTLED (debounced) values, never the live inputs: typing
-  // "10" passes through "1", so a 10% tolerance would flash FAIL at 1% on the way.
-  const { ref: refEntry, tol: tolEntry, band: bandEntry } =
-    parseEntry(referenceSettled, toleranceSettled, toleranceMode);
+  // Reads the SETTLED (debounced) entry, never the live inputs: typing "10" passes through
+  // "1", so a 10% tolerance would flash FAIL at 1% on the way. Unmemoized: a few multiplies.
+  // (NOT because a compiler memoizes them — React Compiler is not in this build; only the
+  // eslint rule that mirrors it runs, and it rejects a useMemo here. Anything O(n) in this
+  // component DOES need an explicit memo.)
+  const {
+    refEntry, tolEntry, bandEntry, refInvalid, tolInvalid, tolTooWide, implausible,
+    measuredBase, baseUnit, lsd, belowResolution, verdict, deviation, status,
+  } = livePassFail({ reading, stable, mode, capNoPartFloor, referenceSettled, toleranceSettled, toleranceMode });
   // An absolute tolerance is read in the REFERENCE's SI range (a bare `30` against a
   // `300p` reference = 30 pF); the field's unit label shows that range.
   const toleranceUnitLabel =
     toleranceMode === 'percent' ? '%' : `${siPrefixOf(refEntry).symbol}${entryUnit}`;
-
-  // Validity uses the settled value too, so a field doesn't flash red mid-typing.
-  const refInvalid = referenceSettled.trim() !== '' && refEntry === null;
-  const tolInvalid = toleranceSettled.trim() !== '' && tolEntry === null;
-  // A too-wide tolerance parses fine, so it is NOT `tolInvalid` — without its own
-  // message the view would just refuse to judge and look broken.
-  const tolTooWide =
-    refEntry !== null && tolEntry !== null && isBandTooWide(refEntry, tolEntry, toleranceMode);
-  const implausible = mode !== null && refEntry !== null && !isPlausibleReference(mode, refEntry);
-
-  // measured: shown whenever there is one — no reference, no stability needed. The
-  //           operator reads the meter through this view, not just verdicts out of it.
-  // verdict:  only with something to compare against AND a settled reading — lifting a
-  //           probe in resistance mode sweeps intermediates, which flash a spurious FAIL.
-  // Unmemoized: a few multiplies. (NOT because a compiler memoizes them — React Compiler
-  // is not in this build; only the eslint rule that mirrors it runs, and it rejects a
-  // useMemo here. Anything O(n) in this component DOES need an explicit memo.)
-  const norm = reading ? normalizeReading(reading) : null;
-  // OL, mid-measurement dashes, and an exact zero (floating probes) all mean nothing is
-  // under the probes. NOTE: capacitance additionally has capNoPartFloor, which lives in
-  // the capture path only — a sub-floor stray still renders here as a measured value.
-  const measuredBase =
-    mode && norm && norm.baseValue !== null && norm.baseValue !== 0 ? norm.baseValue : null;
-
-  const toBase = mode ? ENTRY_UNITS[mode].toBase : 1;
-  const refBase = mode && refEntry !== null ? entryToBase(mode, refEntry) : null;
-  const verdict =
-    measuredBase !== null && refBase !== null && stable && bandEntry !== null
-      ? judge(measuredBase, refBase, bandEntry * toBase)
-      : null;
-
-  // Tolerance narrower than the meter's least-significant digit -> every verdict is
-  // quantization-limited. Advisory only.
-  const lsd = reading ? readingResolution(reading) : null;
-  const belowResolution =
-    mode !== null && bandEntry !== null && lsd !== null &&
-    bandEntry * toBase < lsd;
 
   // Memoized: this component re-renders on every serial batch while `rows` is unbounded,
   // so an unmemoized scan here is O(n) work many times a second.
@@ -258,18 +233,10 @@ export function PassFail({
     [rows],
   );
   const truncated = rows.length > MAX_RENDERED;
-  const baseUnit = norm?.baseUnit ?? '';
 
-  const deviation = measuredBase !== null && refBase !== null ? measuredBase - refBase : null;
-  const statusLine = reading?.isMeasuring
-    ? 'Measuring\u2026'
-    : measuredBase === null
-      ? 'No part connected'
-      : refEntry === null || bandEntry === null
-        ? 'Enter a reference and tolerance to compare'
-        : verdict === null || deviation === null
-          ? 'Settling\u2026'
-          : `${fmtDeviation(baseUnit, deviation, lsd)} from reference`;
+  const statusLine = status === 'deviation'
+    ? `${fmtDeviation(baseUnit, deviation!, lsd)} from reference`
+    : STATUS_TEXT[status];
 
   // Below lg the Reference section lives in the drawer; its opener carries the warning.
   const setupWarning = refInvalid || tolInvalid || tolTooWide || implausible || belowResolution;

@@ -4,6 +4,9 @@
 // because a bug here produces a WRONG PICTURE over CORRECT DATA, which is the hardest kind
 // to notice and impossible to catch by looking at the screen.
 //
+// Feeding it from the store (`feedTier`: what to rebuild, what to fold in) lives here for the
+// same reason.
+//
 // Min AND max per column, never an average or a representative neighbour: a multimeter must
 // never smooth away a transient. That is the guarantee `min-max` decimation gives and the
 // reason `lttb` was rejected. Keeping the real timestamps is what keeps a 3 ms spike at the
@@ -11,6 +14,8 @@
 //
 // Cost is O(1) in session length: `add` touches one column, and widening the columns merges
 // adjacent pairs in a single O(columns) pass, amortised to nothing.
+
+import type { SampleStore } from './samples.ts';
 
 /** One drawn point. `oor` marks a value the operator's y-range clamped. */
 export interface TierPoint {
@@ -239,7 +244,7 @@ export class RenderTier {
 
   /**
    * The extent of every occupied column, unclamped. The y-axis floor needs this and would
-   * otherwise rescan the visible samples — the single largest per-update cost this replaces.
+   * otherwise rescan the visible samples, the largest per-update cost.
    * Returns `null` when the tier is empty.
    */
   extent(): { min: number; max: number } | null {
@@ -252,4 +257,68 @@ export class RenderTier {
     }
     return min === Infinity ? null : { min, max };
   }
+}
+
+// ------------------------------------------------------------ feeding from the store
+
+/**
+ * Column width the 'all' view starts at, before it begins doubling. Deliberately far finer
+ * than the meter's ~330 ms sample interval so a short session is drawn sample-for-sample
+ * rather than as coarse steps; 50 ms x 1,000 columns covers the first ~50 s, and the tier
+ * widens itself from there (seven days is about fourteen doublings, each O(columns)).
+ */
+const ALL_INITIAL_BUCKET_MS = 50;
+
+// What the tier was last built from. `fedTo` is the physical index already folded in; -1
+// means the tier holds a bounded window, not the session, and 'all' must rebuild.
+interface TierFeed { fedTo: number; fedFrom: number; epoch: number }
+export const newTierFeed = (): TierFeed => ({ fedTo: -1, fedFrom: -1, epoch: -1 });
+
+type TierSource = Pick<SampleStore, 'count' | 'firstSeq' | 'tsAt' | 'valueAt' | 'indexAtOrAfter'>;
+
+// Scalar reads: the scan allocates nothing per sample.
+function addRange(tier: RenderTier, src: TierSource, from: number, to: number): void {
+  for (let i = from; i < to; i++) tier.add(src.tsAt(i), src.valueAt(i));
+}
+
+/**
+ * Bring `tier` up to date with `src` for the chart's watermark, epoch and window. Returns the
+ * physical index the chart starts at: a preserve-log mode change advances the watermark
+ * instead of clearing the store, so older rows survive in the table and the CSV while the
+ * trace restarts in the new unit.
+ *
+ * A bounded window is rebuilt every call: it SLIDES, so columns expire from the left and
+ * cannot be maintained incrementally, and it is bounded, so the rebuild is cheap (1h is
+ * ~11,000 samples). It starts ONE sample before `t0` so the trace enters from the left edge
+ * instead of wherever the first in-window sample falls (with "Stable values only" that gap
+ * can be the whole window); `add` folds it into column 0 at its own timestamp, and Chart.js
+ * clips the segment at the edge.
+ *
+ * 'all' is fed incrementally, so per-update work does not grow with the session. It rebuilds
+ * when the contents are invalid: arriving from a bounded window, an epoch bump (a derived
+ * reset, a trim, a restore), a watermark move, or an index past the store (a trim with no
+ * epoch bump — defensive).
+ */
+export function feedTier(
+  tier: RenderTier, feed: TierFeed, src: TierSource,
+  at: { chartFromSeq: number; chartEpoch: number; windowMs: number; now: number },
+): number {
+  const from = Math.max(0, Math.min(src.count, at.chartFromSeq - src.firstSeq));
+  if (Number.isFinite(at.windowMs)) {
+    const bucketMs = windowBucketMs(at.windowMs);
+    const t0 = quantizeAnchor(at.now - at.windowMs, bucketMs);
+    tier.reset(t0, bucketMs);
+    addRange(tier, src, Math.max(from, src.indexAtOrAfter(t0) - 1), src.count);
+    feed.fedTo = -1;
+    return from;
+  }
+  if (feed.fedTo < 0 || feed.epoch !== at.chartEpoch || feed.fedFrom !== from || feed.fedTo > src.count) {
+    tier.reset(src.count > from ? src.tsAt(from) : at.now, ALL_INITIAL_BUCKET_MS);
+    feed.fedTo = from;
+    feed.fedFrom = from;
+    feed.epoch = at.chartEpoch;
+  }
+  addRange(tier, src, feed.fedTo, src.count);
+  feed.fedTo = src.count;
+  return from;
 }

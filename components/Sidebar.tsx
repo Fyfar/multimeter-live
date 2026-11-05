@@ -5,13 +5,10 @@ import { clsx } from 'clsx';
 import { useState } from 'react';
 import type { ConnectionStatus, Transport } from '@/lib/connection';
 import { BAUD_RATES } from '@/lib/settings';
+import type { NavId } from '@/lib/useNavigation';
 import { Drawer } from '@/components/Drawer';
 
 
-export type NavId = 'dashboard' | 'data-log' | 'pass-fail' | 'history' | 'settings';
-// Exported so app/page.tsx can validate a URL hash against the real set of views rather
-// than trusting whatever the address bar contains.
-export const NAV_IDS = ['dashboard', 'data-log', 'pass-fail', 'history', 'settings'] as const;
 const NAV_ITEMS: { id: NavId; label: string }[] = [
   { id: 'dashboard', label: 'Dashboard' },
   { id: 'data-log', label: 'Data Log' },

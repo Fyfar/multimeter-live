@@ -25,9 +25,8 @@ import { displayUnit, resolutionDecimals, STABLE_LSD_TOLERANCE } from '@/lib/par
 import { siAxisScale, toPhysicalUnit } from '@/lib/si';
 import { buildHistogram, type Entry } from '@/lib/histogram';
 import type { SampleStore } from '@/lib/samples';
-import {
-  DEFAULT_COLUMNS, RenderTier, quantizeAnchor, windowBucketMs, type TierPoint,
-} from '@/lib/tier';
+import type { Theme } from '@/lib/useTheme';
+import { DEFAULT_COLUMNS, RenderTier, feedTier, newTierFeed, type TierPoint } from '@/lib/tier';
 
 Chart.register(
   CategoryScale,
@@ -64,20 +63,10 @@ const CHART_TYPE_LABELS: { type: ChartType; label: string }[] = [
 const IN_RANGE_COLOR = 'rgba(59,130,246,0.6)'; // blue — normal bins
 const OUTLIER_COLOR = 'rgba(245,158,11,0.7)';  // amber — under/over-range bins
 
-/**
- * Column width the 'all' view starts at, before it begins doubling. Deliberately far finer
- * than the meter's ~330 ms sample interval so a short session is drawn sample-for-sample
- * rather than as coarse steps; 50 ms x 1,000 columns covers the first ~50 s, and the tier
- * widens itself from there (seven days is about fourteen doublings, each O(columns)).
- */
-const ALL_INITIAL_BUCKET_MS = 50;
-
 /** Shortest span the 'all' axis is drawn over, anchored at its first sample like a bounded
  *  window that is still filling. Tick labels are whole seconds, so a span much under ~10 s
  *  repeats them ('-1s, -1s, Now, Now'). */
 const ALL_MIN_SPAN_MS = 10_000;
-
-export type Theme = 'dark' | 'light';
 
 // Canvas colors cannot follow the CSS tokens, so the neutrals are mirrored here per theme
 // (globals.css owns the source values). Dataset colors are semantic and never change.
@@ -185,15 +174,13 @@ function buildChartConfig(
   }
 
   // Line: a LINEAR time x-axis (ms timestamps as {x,y}) with parsing disabled. The
-  // linear axis pins points to absolute positions, which is what fixed the phantom
-  // *moving* spikes on the old category axis.
+  // linear axis pins points to absolute positions; a category axis makes spikes appear to
+  // move.
   //
-  // Chart.js's `decimation` plugin is gone — no longer imported, registered or enabled. It
-  // engaged when this was handed the raw buffer (~10,800 points at '1h'), but `RenderTier`
-  // reduces to at most 2 x DEFAULT_COLUMNS points in every mode, far below the plugin's
-  // 4x-canvas-width activation threshold, so it could never fire again. The same `min-max`
-  // guarantee it provided is now the tier's, asserted in scripts/check-tier.mts rather than
-  // trusted to a plugin.
+  // Don't add Chart.js's `decimation` plugin: `RenderTier` reduces to at most
+  // 2 x DEFAULT_COLUMNS points in every mode, far below its 4x-canvas-width activation
+  // threshold, so it never fires. The tier gives the `min-max` guarantee, asserted in
+  // scripts/check-tier.mts.
   return {
     type: 'line',
     data: {
@@ -204,11 +191,11 @@ function buildChartConfig(
           borderColor: '#3b82f6',
           backgroundColor: 'rgba(59,130,246,0.07)',
           borderWidth: 2,
-          // Static, deliberately. These were scriptable (reading ctx.raw.oor per point) and
-          // that cost ~2 KB of allocation PER POINT PER FRAME — 64% of everything the page
-          // allocated — because Chart.js builds a resolver context and a proxy for every
-          // element on every draw whenever any option is a function. The out-of-range
-          // markers now live in their own dataset below, so neither dataset needs one.
+          // Static, deliberately. Scriptable ones (reading ctx.raw.oor per point) cost ~2 KB
+          // of allocation PER POINT PER FRAME — 64% of everything the page allocated —
+          // because Chart.js builds a resolver context and a proxy for every element on
+          // every draw whenever any option is a function. The out-of-range markers live in
+          // their own dataset below, so neither dataset needs one.
           pointRadius: 0,
           pointBackgroundColor: '#3b82f6',
           pointBorderColor: '#3b82f6',
@@ -250,7 +237,6 @@ function buildChartConfig(
           label: 'out of range',
           // Chart.js draws datasets in REVERSE of (order, index), so with both at the
           // default order 0 this dataset paints first and the line paints over it. The
-          // markers were dataset-0 points before this split and sat on top; worse, the
           // out-of-range value is CLAMPED to the range bound, so every marker lies exactly
           // on the line's path and the 2px stroke bisects it instead of missing it.
           // order -1 sorts this dataset first, so it is drawn last.
@@ -554,11 +540,7 @@ export function RealtimeChart({
   // What the line view draws: min and max per column, ~2,000 points however long the
   // session is. A ref because it is mutated in place across updates.
   const tierRef = useRef<RenderTier>(new RenderTier(DEFAULT_COLUMNS));
-  // Incremental-feed bookkeeping for 'all'. `fedTo` is the physical index already folded
-  // in; -1 means the tier holds something else (a bounded window) and must be rebuilt.
-  const fedToRef = useRef(-1);
-  const fedFromRef = useRef(-1);
-  const epochRef = useRef(-1);
+  const feedRef = useRef(newTierFeed());
 
   useEffect(() => {
     if (lineUnavailable || !canvasRef.current) return;
@@ -592,53 +574,8 @@ export function RealtimeChart({
 
     const now = Date.now();
     nowRef.current = now; // what the tick and tooltip labels are offsets from
-    const windowMs = TIME_RANGE_MS[timeRange];
     const tier = tierRef.current;
-    // Physical index the chart may start at. A preserve-log mode change advances the
-    // watermark instead of clearing the store, so older rows survive in the table and the
-    // CSV while the trace restarts in the new unit.
-    const from = Math.max(0, Math.min(store.count, chartFromSeq - store.firstSeq));
-
-    if (Number.isFinite(windowMs)) {
-      // Bounded window: rebuild every update. The window SLIDES, so columns expire from the
-      // left and cannot be maintained incrementally — and it is bounded by definition, so
-      // the rebuild is cheap (1h is ~11,000 samples at this meter's rate, well under a
-      // millisecond). `tsAt`/`valueAt` are scalar reads, so the scan allocates nothing.
-      // Both defined in lib/tier.ts, where the self-check can assert them: the width leaves
-      // two columns of headroom, and the anchor is snapped to an absolute bucket boundary so
-      // a sliding window shifts the tier by whole columns instead of re-dealing every sample
-      // into a different bucket each frame.
-      const bucketMs = windowBucketMs(windowMs);
-      const t0 = quantizeAnchor(now - windowMs, bucketMs);
-      // Start ONE sample before the window so the trace enters from the left edge instead
-      // of starting wherever the first in-window sample happens to fall. At 10s that gap is
-      // up to 3% of the width; with "Stable values only" on it can be the whole window,
-      // leaving an empty chart while the meter is plainly reading. `add` folds a pre-t0
-      // sample into column 0 and keeps its own timestamp, so Chart.js clips the segment at
-      // the edge correctly.
-      const start = Math.max(from, store.indexAtOrAfter(t0) - 1);
-      tier.reset(t0, bucketMs);
-      for (let i = start; i < store.count; i++) tier.add(store.tsAt(i), store.valueAt(i));
-      fedToRef.current = -1; // the tier now holds a window, not the session
-    } else {
-      // 'all': maintained incrementally, so per-update work does not grow with the session.
-      // Rebuilt only when the tier's contents are invalidated — a watermark advance, a
-      // retention trim that shifted indices, or arriving here from a bounded window.
-      const stale =
-        fedToRef.current < 0 ||
-        epochRef.current !== chartEpoch ||
-        fedFromRef.current !== from ||
-        fedToRef.current > store.count;
-      if (stale) {
-        tier.reset(store.count > from ? store.tsAt(from) : now, ALL_INITIAL_BUCKET_MS);
-        for (let i = from; i < store.count; i++) tier.add(store.tsAt(i), store.valueAt(i));
-        fedFromRef.current = from;
-        epochRef.current = chartEpoch;
-      } else {
-        for (let i = fedToRef.current; i < store.count; i++) tier.add(store.tsAt(i), store.valueAt(i));
-      }
-      fedToRef.current = store.count;
-    }
+    const from = feedTier(tier, feedRef.current, store, { chartFromSeq, chartEpoch, windowMs: TIME_RANGE_MS[timeRange], now });
 
     // The drawn series and the out-of-range markers, both from the reduction. The
     // operator's y-range is applied HERE, not at capture, so changing it re-clamps the

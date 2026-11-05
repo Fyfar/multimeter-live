@@ -5,9 +5,9 @@
 // screen still looks fine, so this is the only place a regression in what gets recorded shows.
 
 import assert from 'node:assert/strict';
-import { CaptureEngine, type CaptureSettings } from '../lib/capture.ts';
+import { CaptureEngine, displayScale, type CaptureSettings, type EngineView } from '../lib/capture.ts';
 import { SampleStore, CHUNK, MODES, RETENTION_MS } from '../lib/samples.ts';
-import { resolveBand } from '../lib/passfail.ts';
+import { isSupportedMode, livePassFail, parseEntry, resolveBand } from '../lib/passfail.ts';
 import type { Mode, Reading } from '../lib/parser.ts';
 
 let checks = 0;
@@ -32,6 +32,8 @@ const fresh = (s: Partial<CaptureSettings> = {}) => {
   e.setPassFailActive(true);
   return { store, e };
 };
+// The state a batch leaves, as the page reads it.
+const view = (e: CaptureEngine, rs: Reading[]) => { e.ingest(rs); return e.view; };
 const passFail = (e: CaptureEngine, ref: number, pct: number) =>
   e.setPassFailConfig(ref, pct, resolveBand(ref, pct, 'percent'), 'percent');
 // A 10 kΩ part already on the probes when Pass/Fail is set to 10 kΩ ±5%; the next R('10.000') captures.
@@ -54,9 +56,9 @@ const tenKOnView = () => {
 // --- stable run: band around the anchor, not pairwise ---------------------------------
 {
   const { e } = fresh();
-  eq(e.ingest([R('10.000')]).currentStable, false, 'one reading is not a run');
-  eq(e.ingest([R('10.015')]).currentStable, true, '15 LSD from the anchor joins the run');
-  eq(e.ingest([R('10.030')]).currentStable, false, '30 LSD from the ANCHOR restarts, though 15 from the previous');
+  eq(view(e, [R('10.000')]).currentStable, false, 'one reading is not a run');
+  eq(view(e, [R('10.015')]).currentStable, true, '15 LSD from the anchor joins the run');
+  eq(view(e, [R('10.030')]).currentStable, false, '30 LSD from the ANCHOR restarts, though 15 from the previous');
 }
 
 // --- Data Log: recording gate, stats and counts behind the same gate -----------------
@@ -64,13 +66,13 @@ const tenKOnView = () => {
   const { store, e } = fresh();
   e.ingest([R('10.000')]);
   const idle = e.ingest(times(3, () => R('10.000')));
-  eq([store.count, idle.touched, idle.stats], [0, false, null], 'nothing recorded while idle');
+  eq([store.count, idle.touched, e.view.stats], [0, false, null], 'nothing recorded while idle');
   e.setRecording(true, true);
-  const r = e.ingest([R('10.000'), R('10.002'), OL()]);
+  const v = view(e, [R('10.000'), R('10.002'), OL()]);
   eq(store.count, 2, 'OL is never stored');
-  eq([r.stats?.count, r.stats?.min, r.stats?.max, r.stats?.mean], [2, 10_000, 10_002, 10_001], 'Welford stats');
-  eq([r.recordedResolution, r.dominantValue], [1, 10_000], 'resolution + dominant from logged readings');
-  eq(e.ingest([OL()]).stats, null, 'a batch that appends nothing commits no stats');
+  eq([v.stats?.count, v.stats?.min, v.stats?.max, v.stats?.mean], [2, 10_000, 10_002, 10_001], 'Welford stats');
+  eq([v.recordedResolution, v.dominantValue], [1, 10_000], 'resolution + dominant from logged readings');
+  eq(view(e, [OL()]).stats === v.stats, true, 'a batch that appends nothing keeps the same stats object');
 }
 
 // --- stable-only: first settled value, then only a >= 50% change ---------------------
@@ -79,14 +81,17 @@ const tenKOnView = () => {
   e.setRecording(true, true);
   e.ingest(times(5, () => R('10.000')));
   eq(store.count, 1, 'a held part logs once');
+  const held = e.view;
   e.ingest([R('10.010'), R('10.010')]);
   eq(store.count, 1, 'drift is not logged');
+  eq([e.view === held, e.view.stats === held.stats], [true, true],
+    'a filtered-out batch leaves the view, stats included, the same object');
   e.ingest([OL(), R('10.000'), R('10.000')]);
   eq(store.count, 2, 'OL re-arms the latch: the same value logs again');
   e.ingest([R('14.000'), R('14.000')]);
   eq(store.count, 2, 'accepted: a second part within 50% and no probe lift is not logged');
-  const r = e.ingest([R('16.000'), R('16.000')]);
-  eq([store.count, r.stats?.count, [...e.counts.values()].reduce((a, b) => a + b)], [3, 3, 3],
+  const v = view(e, [R('16.000'), R('16.000')]);
+  eq([store.count, v.stats?.count, [...e.counts.values()].reduce((a, b) => a + b)], [3, 3, 3],
     'store, stats and histogram counts agree under the filter');
 }
 
@@ -138,6 +143,44 @@ const tenKOnView = () => {
   eq(e.passFailRows.length, 0, 'unsupported mode captures nothing');
 }
 
+// --- parity: the live panel judges exactly what the engine captures ---------------------
+// The view and the engine share one rule; this is what fails if either grows its own copy.
+{
+  const { e } = fresh();
+  const entry = { RESISTANCE: ['4k7', '1'], CAPACITANCE: ['100n', '10'] } as const;
+  type M = keyof typeof entry;
+  const configure = (m: M) => {
+    const { ref, tol, band } = parseEntry(entry[m][0], entry[m][1], 'percent');
+    e.setPassFailConfig(ref, tol, band, 'percent');
+  };
+  const C = (d: string) => rd('CAPACITANCE', d, 'nF');
+  const noPart = new Set<Reading>();
+  const none = (r: Reading) => { noPart.add(r); return r; };
+  const seq = [
+    R('4.700'), R('4.700'), OL(), R('4.800'), R('4.800'), OL(), R('4.747'), R('4.747'),
+    none(rd('RESISTANCE', '0.000', 'KOM')), R('4.652'), R('4.652'),
+    C('100.0'), C('100.0'), none(C('0.002')), C('108.0'), C('108.0'), none(C('0.002')), C('120.0'), C('120.0'),
+  ];
+  configure('RESISTANCE');
+  e.ingest([R('4.700')]);
+  const captured: string[] = [];
+  for (const r of seq) {
+    const res = e.ingest([r]);
+    if (res.modeReset) configure(r.mode as M);
+    const [ref, tol] = entry[r.mode as M];
+    const lv = livePassFail({
+      reading: r, stable: true, mode: isSupportedMode(r.mode) ? r.mode : null,
+      capNoPartFloor: BASE.capNoPartFloor, referenceSettled: ref, toleranceSettled: tol, toleranceMode: 'percent',
+    });
+    for (const v of res.verdicts) {
+      captured.push(v.verdict);
+      eq([lv.verdict, lv.deviation], [v.verdict, v.deviation], `live verdict == captured row at ${r.display} ${r.unit}`);
+    }
+    if (noPart.has(r)) eq([res.verdicts.length, lv.status], [0, 'no-part'], `${r.display} ${r.unit}: no row, and "no part" live`);
+  }
+  eq(captured, ['PASS', 'FAIL', 'PASS', 'FAIL', 'PASS', 'PASS', 'FAIL'], 'parity sequence captured the expected rows');
+}
+
 // --- Pass/Fail works only on its own view -------------------------------------------
 {
   const e = tenKOnView();
@@ -147,7 +190,7 @@ const tenKOnView = () => {
   const away = e.ingest([OL(), R('12.000'), R('12.000'), OL(), R('10.000'), R('10.000')]);
   eq([away.verdicts.length, away.rowsChanged, e.passFailRows.length], [0, false, 1],
     'off the view: no verdict, no tone, stored rows untouched');
-  eq(away.currentStable, true, 'stability is still tracked off the view');
+  eq(e.view.currentStable, true, 'stability is still tracked off the view');
   e.setPassFailActive(true);
   e.ingest([R('10.000')]);
   eq(e.passFailRows.length, 2, 'back on the view: a part swapped in while away is captured');
@@ -197,22 +240,42 @@ const tenKOnView = () => {
   const r = e.ingest([R('10.000'), rd('VOLTAGE', '99.00', 'V'), rd('VOLTAGE', '99.00', 'V')]);
   eq([r.unit, r.modeReset, r.reset, r.recordingChanged, r.rowsChanged], ['V', true, true, true, true], 'flags');
   eq([store.count, e.recording, e.passFailRows.length], [0, false, 0], 'flushed, stopped, verdicts cleared');
-  eq(r.stats, null, 'nothing appended after the reset');
+  eq(e.view.stats, null, 'nothing appended after the reset');
 }
 {
   const { store, e } = fresh({ preserveOnModeChange: true });
   e.ingest([R('10.000')]);
   e.setRecording(true, true);
-  const s0 = e.ingest([R('10.000'), R('10.000')]).sessionStart;
-  const r = e.ingest([R('10.000'), rd('VOLTAGE', '1.000', 'V')]);
+  const v0 = view(e, [R('10.000'), R('10.000')]);
+  const v1 = view(e, [R('10.000'), rd('VOLTAGE', '1.000', 'V')]);
   eq(store.count, 3, 'old-unit rows, including the one staged this batch, are kept');
-  eq(r.stats, null, 'rows flushed before the reset do not commit the zeroed stats');
-  eq([e.chartFromSeq, r.sessionStart], [store.firstSeq + 3, null], 'watermark past them; no anchor yet');
-  eq(s0 !== null, true, 'the first session had an anchor');
+  eq(v1.stats, null, 'rows flushed before the reset do not commit the zeroed stats');
+  eq([e.chartFromSeq, v1.sessionStart], [store.firstSeq + 3, null], 'watermark past them; no anchor yet');
+  eq(v0.sessionStart !== null, true, 'the first session had an anchor');
+  eq([v1.chartEpoch > v0.chartEpoch, v1.chartFromSeq], [true, store.firstSeq + 3], 'the reset bumps the epoch');
   e.setRecording(true, true);
   const v = rd('VOLTAGE', '1.000', 'V');
-  const r2 = e.ingest([v, rd('VOLTAGE', '1.000', 'V')]);
-  eq([store.count, r2.sessionStart], [5, v.ts], 'the anchor is the first NEW-unit sample');
+  const v2 = view(e, [v, rd('VOLTAGE', '1.000', 'V')]);
+  eq([store.count, v2.sessionStart, v2.unit], [5, v.ts, 'V'], 'the anchor is the first NEW-unit sample');
+}
+
+// --- display scale: recorded values while the chart has samples, else the live reading ---
+{
+  const scale = (store: SampleStore, e: CaptureEngine, live: Reading | null) => {
+    const s = displayScale(store, e.view, live);
+    return [s.binWidth, s.centerValue];
+  };
+  const { store, e } = fresh({ preserveOnModeChange: true });
+  e.ingest([R('10.000')]);
+  eq(scale(store, e, R('9.50')), [10, 9_500], 'empty: the live reading\'s LSD and value');
+  eq([scale(store, e, OL()), scale(store, e, null)], [[undefined, undefined], [undefined, undefined]], 'empty, live OL or none: nothing');
+  e.setRecording(true, true);
+  e.ingest([R('10.000'), R('10.000')]);
+  eq(scale(store, e, OL()), [1, 10_000], 'recorded: frozen resolution and dominant value, live OL ignored');
+  const volts = rd('VOLTAGE', '1.000', 'V');
+  e.ingest([volts]);
+  eq([store.count > 0, e.view.recordedResolution], [true, null], 'preserve-log change: old rows kept, resolution nulled');
+  eq(scale(store, e, volts), [0.001, 1], 'past the watermark nothing is visible: the live reading, not the old rows');
 }
 
 // --- Pass/Fail rows follow "Keep log on mode change" -----------------------------------
@@ -239,29 +302,27 @@ const tenKOnView = () => {
   e.setRecording(true, true);
   const r = e.ingest(Array.from({ length: CHUNK + 1 }, (_, i) => rd('RESISTANCE', '1.000', 'KOM', old + i)));
   eq([r.trimmed, store.count], [false, CHUNK + 1], 'old samples alone stay: the window ends at the newest sample');
+  const before = e.view;
+  eq(before.sessionStart, old, 'precondition: the session started at the oldest sample');
   const r2 = e.ingest([R('1.000')]);
   eq([r2.trimmed, r2.touched, store.count], [true, true, 2], 'a sample past the window drops the old chunk');
+  eq([e.view.chartEpoch > before.chartEpoch, e.view.version > before.version], [true, true], 'a trim bumps epoch and version');
+  eq(e.view.sessionStart, old, 'a trim does not move the session start');
   e.setRecording(false);
   eq(e.ingest([R('1.000')]).trimmed, false, 'readings while not recording add nothing, so trim nothing');
   eq(e.ingest([R('1.000')]).trimmed, false, 'recent samples are not');
+  const kept = e.view;
+  e.flush();
+  eq([e.view.sessionStart, e.view.stats, e.view.chartEpoch > kept.chartEpoch, e.view.version > kept.version],
+    [null, null, true, true], 'a flush clears the session start and stats, bumps epoch and version');
 }
 
 // --- restore: derived state is recomputed from the rows and must equal the live-built state -----
 // The persisted copy holds samples only; stats, histogram counts, recorded resolution and the
 // dominant value are replayed through the same accumulator `ingest` uses. "Close enough" is not
 // the bar: the Statistics panel and the Data Log must agree after a restore.
-const track = (e: CaptureEngine) => {
-  let stats: unknown = null;
-  return {
-    ingest(rs: Reading[]) {
-      const r = e.ingest(rs);
-      if (r.reset) stats = null;
-      if (r.stats) stats = r.stats;
-      return r;
-    },
-    get stats() { return stats; },
-  };
-};
+const session = (v: EngineView) =>
+  [v.chartFromSeq, v.unit, v.sessionStart, v.stats, v.recordedResolution, v.dominantValue, v.passFailRows];
 const moveTo = (
   src: { store: SampleStore; e: CaptureEngine },
   settings: Partial<CaptureSettings> = {},
@@ -275,11 +336,11 @@ const moveTo = (
     segments: src.store.count > 0 ? [src.store.segment(0, src.store.count)] : [],
     notes: [],
   });
-  const res = e.restore({ ...src.e.context, mode: src.e.context.mode!, verdicts: src.e.passFailRows });
-  return { store, e, res };
+  e.restore({ ...src.e.context, mode: src.e.context.mode!, verdicts: src.e.passFailRows });
+  return { store, e };
 };
 const C = (d: string, unit = 'nF') => rd('CAPACITANCE', d, unit);
-const sessions: [string, Partial<CaptureSettings>, (t: ReturnType<typeof track>, e: CaptureEngine) => void][] = [
+const sessions: [string, Partial<CaptureSettings>, (t: CaptureEngine) => void][] = [
   ['mixed LSDs and units', {}, (t) => {
     t.ingest([R('10.000')]);
     t.ingest([R('10.000'), R('10.002'), R('9.998'), rd('RESISTANCE', '10001', 'OM'), rd('RESISTANCE', '0.0100', 'MOM'), R('10.000')]);
@@ -301,16 +362,20 @@ const sessions: [string, Partial<CaptureSettings>, (t: ReturnType<typeof track>,
 ];
 for (const [name, settings, play] of sessions) {
   const live = fresh(settings);
-  const t = track(live.e);
   live.e.setRecording(true, true);
-  play(t, live.e);
+  play(live.e);
   const back = moveTo(live, settings);
-  eq(back.res.stats, t.stats, `${name}: statistics rebuilt exactly (mean, m2, min, max)`);
+  const [a, b] = [back.e.view, live.e.view];
+  eq(a.stats, b.stats, `${name}: statistics rebuilt exactly (mean, m2, min, max)`);
   eq(back.e.counts, live.e.counts, `${name}: histogram counts rebuilt exactly`);
-  eq([back.res.recordedResolution, back.res.dominantValue],
-    [live.e.ingest([]).recordedResolution, live.e.ingest([]).dominantValue], `${name}: resolution and dominant value`);
+  eq([a.recordedResolution, a.dominantValue], [b.recordedResolution, b.dominantValue], `${name}: resolution and dominant value`);
   eq(back.e.chartFromSeq, live.e.chartFromSeq, `${name}: watermark`);
   eq(back.e.recording, false, `${name}: recording stays off even though the live session was recording`);
+  // Not compared: version/chartEpoch (this engine's counters), recording (asserted above),
+  // currentStable (the target engine's, until the next batch).
+  eq(session(a), session(b), `${name}: the restored view equals the live-built one`);
+  eq([a.version > 0, a.chartEpoch > 0], [true, true], `${name}: restore bumps version and epoch`);
+  eq(a.passFailRows === back.e.passFailRows, true, `${name}: the view holds the engine's verdict array itself`);
 }
 
 // a resistance session with `n` recorded rows
@@ -404,6 +469,23 @@ const recorded = (n: number) => {
   passFail(e, 10_000, 5);
   e.ingest([OL(), R('10.000'), R('10.000')]);
   eq(e.passFailRows.map((v) => v.id), [0, 1, 2], 'the next captured verdict has a fresh id');
+}
+
+// a restore leaves the shown reading's stable flag alone until the next batch, as the page did
+{
+  const into = fresh();
+  into.e.ingest([R('10.000'), R('10.000')]);
+  moveTo(recorded(2), {}, into);
+  eq(into.e.view.currentStable, true, 'restore keeps currentStable until the next batch');
+}
+
+// a note edit bumps the version and nothing else
+{
+  const { store, e } = recorded(2);
+  const v = e.view;
+  e.setNote(store.firstSeq, 'probe A');
+  eq([e.view.version > v.version, e.view.chartEpoch, e.view.stats === v.stats, store.notes], [true, v.chartEpoch, true, [[store.firstSeq, 'probe A']]],
+    'setNote stores the note and bumps only the version');
 }
 
 console.log(`check-capture: ${checks} assertions passed`);

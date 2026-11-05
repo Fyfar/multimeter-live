@@ -44,9 +44,9 @@ export function ServiceWorker() {
         // registration time. The register()/update() update check can move a new
         // worker into installing/waiting before our `updatefound` listener is
         // attached below — so handling only `updatefound` (or only `waiting`)
-        // races and loses the event. That race is exactly why the installed PWA
-        // missed the prompt until the site was reopened in a browser tab (where,
-        // by then, the worker had reached `waiting` and was caught). track() is a
+        // races and loses the event: the installed PWA then misses the prompt until
+        // the site is reopened in a browser tab (where, by then, the worker has
+        // reached `waiting` and is caught). track() is a
         // no-op on null and gates on an existing controller, so first installs
         // still don't prompt.
         track(reg.waiting);

@@ -55,13 +55,12 @@ export type TimeWindow = { min?: number; max?: number; stepSize?: number };
  * both arms give the same span, with no jump to hide.
  *
  * The anchor is the SESSION start, never the oldest stored sample. The store is trimmed,
- * so its oldest sample describes retention, not the session. It did once diverge outright:
- * a 3600-sample cap held only 20 minutes at 3 samples/second, so the oldest point at '1h'
- * was permanently newer than `now - 1h` and the window would have stayed in its filling
- * phase forever, with a dead band on the right that never closed. Retention is stated in
- * time now (RETENTION_MS in lib/samples.ts) and is seven days, far longer than any bounded
- * window — keep the two separate anyway, so that changing retention cannot silently move
- * the anchor.
+ * so its oldest sample describes retention, not the session. Under a 3600-sample cap (20
+ * minutes at 3 samples/second) the oldest point at '1h' is permanently newer than
+ * `now - 1h`, so the window stays in its filling phase forever, with a dead band on the
+ * right that never closes. Retention is seven days (RETENTION_MS in lib/samples.ts), far
+ * longer than any bounded window — keep the two separate anyway, so that changing
+ * retention cannot silently move the anchor.
  *
  * 'all' has no fixed duration to pin to, so it returns nothing set and the axis fits the
  * data. It is the one range whose scale is not constant, which is inherent: an unbounded
@@ -121,6 +120,13 @@ export type Settings = {
   stableOnly: boolean;
 };
 
+// A free-text numeric field (range bound, trigger threshold): '' or junk is "unset".
+export const toFinite = (s: string): number | null => {
+  if (s === '') return null;
+  const n = Number.parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+};
+
 export const DEFAULT_SETTINGS: Settings = {
   stabilityCount: 2,
   hysteresisPct: 10,
@@ -129,11 +135,11 @@ export const DEFAULT_SETTINGS: Settings = {
   noDataAudio: false,
   // 5 pF. Bench-derived: the nF range resolves to 1 pF and floating probes read a clean
   // 0.000 nF, so the zero check does the work. Kept LOW deliberately — meter accuracy here
-  // is 5% + 20 counts, and the old 100 pF default rejected real 100 pF caps outright.
+  // is 5% + 20 counts, and a 100 pF default would reject real 100 pF caps outright.
   capNoPartFloor: 0.005,
   verdictAudio: false,
-  // These five reproduce the useState initial values app/page.tsx used before they were
-  // persisted — a first visit must behave exactly as it did.
+  // These five are the app's pre-persistence behaviour: a first visit must behave as it
+  // always has. Don't change them casually.
   baud: 115200,
   timeRange: '10s',
   autoScale: true,
@@ -153,14 +159,13 @@ export const MAX_HYSTERESIS_PCT = 99;
 // A no-part floor of 0 disables the feature (nothing is ever below it), which is a
 // legitimate choice; the upper bound just stops a typo swallowing every real part.
 export const MIN_NO_PART_FLOOR = 0;
-// 10 nF is still 2000x the default — generous as a typo-stop, without the old 1 uF
-// ceiling that would have treated every capacitor below 1 uF as "no part".
+// 10 nF is still 2000x the default — generous as a typo-stop. A 1 uF ceiling would let
+// a typo treat every capacitor below 1 uF as "no part".
 export const MAX_NO_PART_FLOOR = 10;
 
 const STORAGE_KEY = 'multimeter-live:settings';
-// Bumped to 3 when the connection/presentation preferences were added. A mismatch discards
-// the whole blob (see loadSettings), so every operator's settings reset once on that deploy
-// — accepted rather than carrying migration code in a client-only app.
+// A mismatch discards the whole blob (see loadSettings), so every bump resets every
+// operator's settings once — accepted rather than carrying migration code in a client-only app.
 const SCHEMA_VERSION = 3;
 
 /** Clamp + round to an integer stability count >= MIN_STABILITY_COUNT. */

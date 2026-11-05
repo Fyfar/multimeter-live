@@ -3,8 +3,8 @@
 // staged append to the store. No React, no DOM: `scripts/check-capture.mts` drives it under
 // Node, because a wrong capture rule records the wrong rows and nothing on screen says so.
 //
-// It never touches React state. `ingest` returns what changed and the page commits it, once
-// per batch — which is what keeps setState out of the per-sample loop by construction.
+// It never touches React state. `ingest` returns the batch's events and the page commits
+// `view` once per batch — which is what keeps setState out of the per-sample loop by construction.
 
 import {
   displayDecimals, lsdOf, normalizeReading, readingResolution, withinStableBand,
@@ -12,7 +12,7 @@ import {
 } from './parser.ts';
 import { RETENTION_MS, type SampleStore } from './samples.ts';
 import {
-  ENTRY_UNITS, entryToBase, isSupportedMode, judge,
+  canJudge, isCapacitanceStray, partUnderProbes, verdictFor,
   type ToleranceMode, type VerdictRow,
 } from './passfail.ts';
 import { DEFAULT_SETTINGS, type Settings } from './settings.ts';
@@ -36,6 +36,7 @@ export type CaptureSettings = Pick<
   'stabilityCount' | 'hysteresisPct' | 'stableOnly' | 'preserveOnModeChange' | 'capNoPartFloor'
 >;
 
+// What one batch did, as events. The state it left is `view`.
 export interface BatchResult {
   // Base unit of the last mode/unit change in this batch, else null.
   unit: string | null;
@@ -45,32 +46,58 @@ export interface BatchResult {
   reset: boolean;
   touched: boolean;
   trimmed: boolean;
-  sessionStart: number | null;
-  // A copy when this batch appended since its last reset; null means "do not commit".
-  stats: SessionStats | null;
   verdicts: VerdictRow[];
   rowsChanged: boolean;
   recordingChanged: boolean;
-  currentStable: boolean;
-  recordedResolution: number | null;
-  dominantValue: number | null;
+}
+
+// Everything render reads from the engine. A new object only when a field changed, so the
+// page can hand it to setState after every engine call and an unchanged one bails out.
+export interface EngineView {
+  // The store mutates in place; this is what tells render it moved (a staged or trimmed
+  // sample, a flush, a restore, a note edit).
+  readonly version: number;
+  // Invalidates the chart's incremental tier: a derived reset, a trim, a restore.
+  readonly chartEpoch: number;
+  readonly chartFromSeq: number;
+  // Base token ('OM'/'V'/'A'/'nF'), '' before the first reading.
+  readonly unit: string;
+  readonly recording: boolean;
+  // The run as of the last batch's last reading, which is the reading the page shows.
+  readonly currentStable: boolean;
+  readonly sessionStart: number | null;
+  // Same object until a sample is accumulated, so a batch that records nothing (the
+  // stable filter, most of the time) does not re-render the statistics.
+  readonly stats: SessionStats | null;
+  readonly recordedResolution: number | null;
+  readonly dominantValue: number | null;
+  // The engine's own array: the persister detects verdict changes by its identity.
+  readonly passFailRows: VerdictRow[];
+}
+
+// Bin width (also the y-axis LSD floor and every resolution-derived decimal count) and the
+// histogram window centre. With samples the chart can see: the frozen recorded values, so both
+// hold when logging stops or the live reading auto-ranges or goes OL. With none: the live
+// reading, as a preview. Gates on the post-watermark count, never `store.count`: after a
+// preserve-log mode change the store keeps the old unit's rows while both recorded values are
+// null, which would take the histogram off the LSD grid and drop the floor and the decimals.
+export function displayScale(
+  store: Pick<SampleStore, 'count' | 'firstSeq'>,
+  view: Pick<EngineView, 'chartFromSeq' | 'recordedResolution' | 'dominantValue'>,
+  live: Reading | null,
+): { binWidth?: number; centerValue?: number } {
+  if (store.count - (view.chartFromSeq - store.firstSeq) > 0) {
+    return { binWidth: view.recordedResolution ?? undefined, centerValue: view.dominantValue ?? undefined };
+  }
+  const value = live ? normalizeReading(live).baseValue : null;
+  if (live === null || value === null) return {};
+  return { binWidth: readingResolution(live) ?? undefined, centerValue: value };
 }
 
 export interface RestoreInput {
   mode: string;
   unit: string;
   chartFromSeq: number;
-  verdicts: VerdictRow[];
-}
-
-// What the page commits after `restore`, once, as it does `BatchResult` after `ingest`.
-export interface RestoreResult {
-  unit: string;
-  chartFromSeq: number;
-  sessionStart: number | null;
-  stats: SessionStats | null;
-  recordedResolution: number | null;
-  dominantValue: number | null;
   verdicts: VerdictRow[];
 }
 
@@ -126,6 +153,17 @@ export class CaptureEngine {
   private dominantCount = 0;
   // Set by `restore`, spent by the first mode change after it. See `restore`.
   private restoreGuard = false;
+  private version = 0;
+  private chartEpoch = 0;
+  // A latch, not a derivation: stamped at the end of the first batch that leaves a sample the
+  // chart can see, held until a reset. A retention trim drops the oldest samples and must not
+  // move the x-axis anchor with them (gotchas.md, Chart).
+  private sessionStartAt: number | null = null;
+  // Written only at the end of `ingest`: flush, restore and a recording start leave the
+  // shown reading's flag alone until the next batch, as the page always has.
+  private currentStable = false;
+  private statsSnap: SessionStats | null = null;
+  private cachedView: EngineView | null = null;
 
   private readonly store: SampleStore;
 
@@ -192,12 +230,18 @@ export class CaptureEngine {
   //
   // Deliberately does NOT touch `pfLastCaptured`: that guard is what stops a held
   // part from being captured twice, and it already re-arms itself on a genuine probe
-  // lift (baseValue null/no-part, in ingest). Resetting it here too used to re-capture
-  // (and re-beep) the SAME still-connected part the instant Clear Batch was pressed.
-  // Clear Batch is a table boundary, not a probe-lift.
+  // lift (baseValue null/no-part, in ingest). Resetting it here would re-capture and
+  // re-beep the part still on the probes. Clear Batch is a table boundary, not a probe-lift.
   clearVerdicts(): void {
     this.passFailRows = [];
     this.pfRowId = 0;
+  }
+
+  // Annotation only, keyed on `seq` (survives trimming). The bump is what re-renders the
+  // controlled note input; nothing else about the store changed.
+  setNote(seq: number, note: string): void {
+    this.store.setNote(seq, note);
+    this.version++;
   }
 
   // Full session flush: clear the canonical store AND every derived projection.
@@ -206,6 +250,7 @@ export class CaptureEngine {
     // `clear()` keeps seq monotonic, so the watermark below lands past every seq ever used
     // and a stale watermark can never sit ahead of new samples.
     this.store.clear();
+    this.version++;
     this.resetDerived();
   }
 
@@ -213,13 +258,13 @@ export class CaptureEngine {
   // while KEEPING the canonical samples — the "keep log on mode change" path. Those views
   // can't mix units; the per-row table/CSV can (each row carries its own mode/unit).
   //
-  // This is the ONE thing two parallel buffers were genuinely buying, and it costs one
-  // integer: the store is untouched and the chart simply starts reading later. Clearing the
-  // store here would take the operator's log with it.
+  // One integer, not a second buffer: the store is untouched and the chart simply starts
+  // reading later. Clearing the store here would take the operator's log with it.
   private resetDerived(): void {
     this.resetAccumulators();
     // Next unused seq: everything already stored belongs to the previous unit.
     this.chartFromSeq = this.store.firstSeq + this.store.count;
+    this.chartEpoch++;
   }
 
   // The trigger and the Pass/Fail reference typed for the current mode. The page clears its
@@ -244,6 +289,30 @@ export class CaptureEngine {
     this.counts.clear();
     this.dominantValue = null;
     this.dominantCount = 0;
+    this.statsSnap = null;
+    this.sessionStartAt = null;
+  }
+
+  get view(): EngineView {
+    const s = this.stats;
+    if (s.count > 0 && this.statsSnap?.count !== s.count) this.statsSnap = { ...s };
+    const next: EngineView = {
+      version: this.version,
+      chartEpoch: this.chartEpoch,
+      chartFromSeq: this.chartFromSeq,
+      unit: this.unit,
+      recording: this.recording,
+      currentStable: this.currentStable,
+      sessionStart: this.sessionStartAt,
+      stats: this.statsSnap,
+      recordedResolution: this.recordedResolution,
+      dominantValue: this.dominantValue,
+      passFailRows: this.passFailRows,
+    };
+    const prev = this.cachedView;
+    if (prev !== null && (Object.keys(next) as (keyof EngineView)[]).every((k) => next[k] === prev[k])) return prev;
+    this.cachedView = next;
+    return next;
   }
 
   // What a saved session needs to carry besides the samples so `restore` can put the engine
@@ -259,7 +328,7 @@ export class CaptureEngine {
   // and flushing the restored rows (a fresh page has `mode === null`; see gotchas.md). The
   // guard covers the other way in: restoring a resistance session while the meter shows voltage
   // makes the first reading a REAL mode change.
-  restore(s: RestoreInput): RestoreResult {
+  restore(s: RestoreInput): void {
     const store = this.store;
     this.mode = s.mode;
     this.unit = s.unit;
@@ -280,22 +349,16 @@ export class CaptureEngine {
       const lsd = unit === '' ? null : lsdOf(store.decimalsAt(i), unit);
       this.accumulate(store.valueAt(i), lsd);
     }
-    return {
-      unit: s.unit,
-      chartFromSeq: s.chartFromSeq,
-      sessionStart: this.sessionStart(),
-      stats: this.stats.count > 0 ? { ...this.stats } : null,
-      recordedResolution: this.recordedResolution,
-      dominantValue: this.dominantValue,
-      verdicts: s.verdicts,
-    };
+    this.sessionStartAt = this.sessionStart();
+    this.version++;
+    this.chartEpoch++;
   }
 
-  // The chart's x-axis anchor: the oldest sample the chart can actually see, read from the
-  // store against the FINAL watermark rather than tracked during a batch. Stating it as a
-  // derivation instead of a running candidate is what makes it immune to a mid-batch watermark
-  // advance — the preserve-log mode change flushes old-unit samples and THEN advances, so
-  // anything captured before that advance is the previous unit.
+  // The candidate for the `sessionStartAt` latch: the oldest sample the chart can actually see,
+  // read from the store against the FINAL watermark rather than tracked during a batch. Stating
+  // it as a derivation instead of a running candidate is what makes it immune to a mid-batch
+  // watermark advance — the preserve-log mode change flushes old-unit samples and THEN advances,
+  // so anything captured before that advance is the previous unit.
   private sessionStart(): number | null {
     const anchorIdx = Math.max(0, this.chartFromSeq - this.store.firstSeq);
     return this.store.count > anchorIdx ? this.store.tsAt(anchorIdx) : null;
@@ -307,7 +370,16 @@ export class CaptureEngine {
   // sample, instead of vanishing at the first reading.
   private trimToWindow(): boolean {
     const n = this.store.count;
-    return n > 0 && this.store.trim(this.store.tsAt(n - 1) - RETENTION_MS);
+    const trimmed = n > 0 && this.store.trim(this.store.tsAt(n - 1) - RETENTION_MS);
+    if (trimmed) this.chartEpoch++;
+    return trimmed;
+  }
+
+  // What the view reads at the end of a batch. Stamped after the trim, from the final watermark.
+  private settleBatch(touched: boolean): void {
+    if (touched) this.version++;
+    this.sessionStartAt ??= this.sessionStart();
+    this.currentStable = this.stableRun >= this.stabilityCount;
   }
 
   // The per-sample accumulation for one recorded value: histogram counts and the dominant
@@ -352,13 +424,11 @@ export class CaptureEngine {
     // loop discards already-collected samples on a mode change and on a trigger edge, and
     // a store appended per sample has no un-append.
     //
-    // Collapsing the old `newPoints`/`newRows` pair into one also repairs a live bug: the
-    // trigger branch below used to clear only `newPoints`, so a re-trigger mid-batch kept
-    // rows in the log whose chart points had been dropped — two consumers disagreeing, in
-    // the function whose comment claims their membership is identical by construction.
+    // One array, so a trigger edge discards chart and log samples together. With two, a
+    // re-trigger mid-batch kept log rows whose chart points had been dropped.
     const staged: { ts: number; value: number; mode: Mode; unit: string; decimals: number }[] = [];
     // Whether this batch changed anything the UI reads: a staged sample, or a retention
-    // trim that dropped one. Everything the UI reads now lives behind the same gate.
+    // trim that dropped one. Everything the UI reads lives behind this gate.
     let touched = false;
     const newVerdicts: VerdictRow[] = [];
 
@@ -371,14 +441,8 @@ export class CaptureEngine {
     // path advances the watermark immediately afterwards — so the candidate would be an
     // old-unit sample that the advance then excludes from the chart. The anchor is derived
     // once, at the end of the batch, from the FINAL watermark.
-    //
-    // Samples appended SINCE THE LAST RESET in this batch. Zeroed at every reset site,
-    // because stats is zeroed there too: counting across a reset would commit a
-    // freshly-zeroed stats object over the `null` the reset queued.
-    let appended = 0;
     const flushStaged = () => {
       for (const st of staged) store.append(st.ts, st.value, st.mode, st.unit, st.decimals);
-      appended += staged.length;
       staged.length = 0;
     };
     for (const r of readings) {
@@ -406,7 +470,6 @@ export class CaptureEngine {
           touched = true;
         }
         reset = true;
-        appended = 0;
         // A real mode/unit change makes the in-progress data, threshold and reference
         // meaningless in the new unit — stop logging and clear them. (Skip on the first
         // reading, which is initial detection, not a change, so a pre-typed threshold
@@ -435,13 +498,11 @@ export class CaptureEngine {
       // Trigger edges (evaluated before recording so the crossing sample is captured).
       const mag = baseValue !== null ? Math.abs(baseValue) : null;
       if (armed && threshold !== null && !this.recording && mag !== null && mag > threshold) {
-        // Clears EVERYTHING staged, chart and log alike. Previously only the chart half was
-        // dropped here; see the `staged` comment above.
+        // Clears EVERYTHING staged, chart and log alike.
         staged.length = 0;
         this.flush();
         reset = true;
         touched = true;
-        appended = 0;
         this.recording = true;
         this.triggerStarted = true;
         recordingChanged = true;
@@ -451,17 +512,13 @@ export class CaptureEngine {
         recordingChanged = true;
       }
 
-      // Capacitance has no OL on lifted probes — it reads lead stray capacitance (pF),
-      // which is numeric, so without this it appends a junk near-zero row on every probe
-      // lift and never clears the last-logged reference. A floor of 0 disables it.
-      const noPart =
-        baseValue !== null &&
-        r.mode === 'CAPACITANCE' &&
-        Math.abs(baseValue) < this.capNoPartFloor;
+      // A capacitance stray would otherwise append a junk row on every probe lift and never
+      // clear the last-logged reference.
+      const noPart = isCapacitanceStray(r.mode, baseValue, this.capNoPartFloor);
 
       // Stable-run tracking runs regardless of the recording session, because Pass/Fail
-      // capture has no session of its own (its batch boundary is Clear). Behavior-
-      // preserving for the Data Log: every path that STARTS recording resets these
+      // capture has no session of its own (its batch boundary is Clear). Harmless for
+      // the Data Log: every path that STARTS recording resets these
       // first, so anything accumulated while idle is wiped when recording begins.
       if (baseValue === null || noPart) {
         // OL (and a capacitance no-part reading) are excluded from the filtered
@@ -489,25 +546,13 @@ export class CaptureEngine {
         const stable = this.stableRun >= this.stabilityCount;
 
         // ---- Pass/Fail capture (independent of the recording session; Pass/Fail view only)
-        // An exact zero means nothing is connected, not a part measuring zero: with the
-        // probes floating the meter settles on 0 in every supported mode, and a real
-        // component never reads a clean 0 (a 0R link still shows lead resistance).
-        // Scoped to Pass/Fail — the Data Log records a genuine 0 as a real measurement.
-        const pfRefEntry = this.pfRefEntry;
-        const pfBandEntry = this.pfBandEntry;
-        if (baseValue === 0) {
+        // Here only an exact zero can fail `partUnderProbes` (OL and strays took the branch
+        // above); it re-arms the latch without resetting the run.
+        if (!partUnderProbes(r.mode, baseValue, this.capNoPartFloor)) {
           this.pfLastCaptured = null;
         } else if (
           this.passFailActive &&
-          stable &&
-          pfRefEntry !== null &&
-          pfBandEntry !== null &&
-          isSupportedMode(r.mode) &&
-          // Guards a stale reference being judged in the wrong unit: the mode-change
-          // reset is gated on `baseUnit !== ''`, so an unrecognized unit string
-          // (documented as possible above nF) skips it and leaves the old reference
-          // live while r.mode has already changed.
-          baseUnit === ENTRY_UNITS[r.mode].baseUnit
+          canJudge(r.mode, baseUnit, stable, this.pfRefEntry, this.pfBandEntry)
         ) {
           const last = this.pfLastCaptured;
           // Gated on the stable run, same flag the live verdict uses (via currentStable),
@@ -517,21 +562,15 @@ export class CaptureEngine {
           // within one held part; a probe lift clears the reference for the next.
           if (isMajorChange(baseValue, last)) {
             this.pfLastCaptured = baseValue;
-            const toBase = ENTRY_UNITS[r.mode].toBase;
-            const baseReference = entryToBase(r.mode, pfRefEntry);
-            const baseBand = pfBandEntry * toBase;
             newVerdicts.push({
               id: this.pfRowId++,
               ts: r.ts,
               iso: localIso(r.ts),
               mode: r.mode,
               baseValue,
-              baseReference,
-              baseBand,
+              ...verdictFor(r.mode, baseValue, this.pfRefEntry!, this.pfBandEntry!),
               toleranceMode: this.pfToleranceMode,
               toleranceValue: this.pfToleranceValue!,
-              verdict: judge(baseValue, baseReference, baseBand),
-              deviation: baseValue - baseReference,
               resolution: lsd,
               unit: r.unit,
               decimals: displayDecimals(r.display),
@@ -551,12 +590,10 @@ export class CaptureEngine {
 
           if (logSample) {
             // Everything recorded is behind this one gate, deliberately: the store, the
-            // histogram counts, the recorded resolution and the statistics. The counts sat
-            // outside it once, counting every reading regardless of the filter, so the
-            // histogram grew three times a second while the Samples tile stayed at the number
-            // of recorded entries — two readouts of the same session disagreeing by orders
-            // of magnitude. Hoisting any of it to the `recording` level one scope out would
-            // silently disable "Stable values only" for that consumer.
+            // histogram counts, the recorded resolution and the statistics. Hoisting any of
+            // it one scope out bypasses "Stable values only" for that consumer: hoisted
+            // counts would grow the histogram three times a second while the Samples tile
+            // counts recorded entries.
             staged.push({
               ts: r.ts,
               value: baseValue,
@@ -577,6 +614,7 @@ export class CaptureEngine {
     // A dropped chunk invalidates the chart's incremental tier, which is what `chartEpoch` tells it.
     const trimmed = this.trimToWindow();
     if (trimmed) touched = true;
+    this.settleBatch(touched);
 
     // Same batched append for the Pass/Fail store.
     if (newVerdicts.length > 0) {
@@ -584,25 +622,6 @@ export class CaptureEngine {
       rowsChanged = true;
     }
 
-    return {
-      unit: unitChanged,
-      modeReset,
-      reset,
-      touched,
-      trimmed,
-      sessionStart: this.sessionStart(),
-      // Only when something was actually logged: stats mutates inside `if (logSample)`,
-      // so with the stable filter on most batches change nothing and a fresh object identity
-      // would re-render StatisticsPanel three times a second for nothing.
-      stats: appended > 0 ? { ...this.stats } : null,
-      verdicts: newVerdicts,
-      rowsChanged,
-      recordingChanged,
-      // After the loop the run describes the LAST reading of the batch, which is the one
-      // the page's `current` holds.
-      currentStable: this.stableRun >= this.stabilityCount,
-      recordedResolution: this.recordedResolution,
-      dominantValue: this.dominantValue,
-    };
+    return { unit: unitChanged, modeReset, reset, touched, trimmed, verdicts: newVerdicts, rowsChanged, recordingChanged };
   }
 }

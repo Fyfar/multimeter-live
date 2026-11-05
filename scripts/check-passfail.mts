@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import {
   parseSiValue, entryToBase, ENTRY_UNITS, formatEntryValue, isPlausibleReference,
   isSupportedMode, resolveBand, isBandTooWide, judge, SUPPORTED_MODES,
-  parseSiEntry, resolveAbsoluteTolerance, verdictCsvLine, summarizeBatch, type VerdictRow,
+  parseSiEntry, resolveAbsoluteTolerance, verdictCsvLine, summarizeBatch, livePassFail, type VerdictRow,
 } from '../lib/passfail.ts';
+import type { Mode, Reading } from '../lib/parser.ts';
 
 let checks = 0;
 const eq = (a: unknown, b: unknown, m: string) => { assert.equal(a, b, m); checks++; };
@@ -217,5 +218,60 @@ close(sum.stats!.mean, 20, 'mean of the trailing run');
 eq(sum.resolution, 0.1, 'coarsest LSD of the run, not of the whole batch');
 eq(summarizeBatch(batch, 'CAPACITANCE')?.stats, null, 'live mode has no rows -> no spread, yield kept');
 eq(summarizeBatch([], 'RESISTANCE'), null, 'empty batch');
+
+// --- livePassFail: what the view shows, from the same rule the engine captures with ---------
+{
+  const deq = (a: unknown, b: unknown, m: string) => { assert.deepEqual(a, b, m); checks++; };
+  const reading = (mode: Mode, display: string, unit: string, isMeasuring = false): Reading => ({
+    mode, display, unit, isMeasuring, isOverload: display === 'OL', ts: 0,
+    value: display === 'OL' || isMeasuring ? null : Number.parseFloat(display),
+  });
+  const R = (d: string, unit = 'KOM') => reading('RESISTANCE', d, unit);
+  const C = (d: string) => reading('CAPACITANCE', d, 'nF');
+  const live = (r: Reading | null, o: Partial<Parameters<typeof livePassFail>[0]> = {}) => livePassFail({
+    reading: r, stable: true, mode: r && isSupportedMode(r.mode) ? r.mode : null, capNoPartFloor: 0.005,
+    referenceSettled: '4k7', toleranceSettled: '1', toleranceMode: 'percent', ...o,
+  });
+  const capRef = { referenceSettled: '100n', toleranceSettled: '10' };
+
+  deq(live(reading('CAPACITANCE', '-.--', 'nF', true)).status, 'measuring', 'meter dashes: measuring');
+  const ol = live(R('OL'));
+  deq([ol.status, ol.measuredBase, ol.verdict], ['no-part', null, null], 'OL: no part, nothing measured');
+  deq(live(R('0.000')).status, 'no-part', 'an exact zero is no part');
+  const stray = live(C('0.004'), capRef);
+  deq([stray.status, stray.measuredBase, stray.verdict], ['no-part', null, null], 'a capacitance stray below the floor is no part');
+  const atFloor = live(C('0.005'), capRef);
+  deq([atFloor.measuredBase, atFloor.verdict], [0.005, 'FAIL'], 'at the floor it is a part, and judged');
+  deq(live(C('0.004'), { ...capRef, capNoPartFloor: 0 }).verdict, 'FAIL', 'a floor of 0 disables the stray rule');
+
+  const noRef = live(R('4.700'), { referenceSettled: '' });
+  deq([noRef.status, noRef.refInvalid, noRef.measuredBase], ['no-reference', false, 4700], 'no reference: measured, not judged');
+  const badRef = live(R('4.700'), { referenceSettled: '4x7' });
+  deq([badRef.status, badRef.refInvalid, badRef.verdict], ['no-reference', true, null], 'invalid reference');
+  const wide = live(R('4.700'), { toleranceSettled: '150' });
+  deq([wide.tolTooWide, wide.tolInvalid, wide.verdict, wide.status], [true, false, null, 'no-reference'],
+    'too-wide tolerance has its own flag and no verdict');
+  const settling = live(R('4.700'), { stable: false });
+  deq([settling.status, settling.verdict, settling.measuredBase], ['settling', null, 4700], 'not stable: settling');
+  const judged = live(R('4.700'));
+  deq([judged.status, judged.verdict, judged.deviation], ['deviation', 'PASS', 0], 'judged');
+
+  // 4k7 ±1% = 4653 .. 4747 Ω
+  deq([live(R('4.747')).verdict, live(R('4.653')).verdict], ['PASS', 'PASS'], 'PASS on both band edges');
+  deq([live(R('4.748')).verdict, live(R('4.652')).verdict], ['FAIL', 'FAIL'], 'FAIL one LSD outside');
+  deq(live(R('4.700'), { toleranceSettled: '0.01' }).belowResolution, true, '±0.47 Ω under a 1 Ω LSD');
+  deq(live(R('4.700')).belowResolution, false, '±47 Ω over a 1 Ω LSD');
+
+  const implausible = live(C('100.0'), { referenceSettled: '100', toleranceSettled: '10' });
+  deq([implausible.implausible, implausible.verdict], [true, 'FAIL'], 'an implausible reference still produces a verdict');
+  // Rule 4: the entry is farads, the reading nF.
+  const f = live(C('105.0'), capRef);
+  deq(f.verdict, 'PASS', '105 nF against 100n ±10%');
+  close(f.deviation, 5, 'deviation in nF');
+  deq(live(C('111.0'), capRef).verdict, 'FAIL', '111 nF against 100n ±10%');
+
+  const unknown = live(R('4.700', 'XOM'));
+  deq([unknown.verdict, unknown.baseUnit], [null, 'XOM'], 'an unrecognized unit is never judged against the reference');
+}
 
 console.log(`check-passfail: ${checks} assertions passed`);

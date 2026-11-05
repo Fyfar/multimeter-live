@@ -3,7 +3,7 @@
 // normalizeReading() produces (parser.ts SCALE). They differ for Capacitance, whose base
 // is nF — keeping the two apart is what lets the operator type `22m` and not do maths.
 
-import { SCALE, type Mode } from './parser.ts';
+import { SCALE, normalizeReading, readingResolution, type Mode, type Reading } from './parser.ts';
 import { siPrefixOf } from './si.ts';
 import { csvBlob, csvEsc, downloadCsv } from './csv.ts';
 import type { SessionStats } from './capture.ts';
@@ -220,6 +220,101 @@ export function parseEntry(reference: string, tolerance: string, mode: Tolerance
 export function judge(measured: number, reference: number, band: number): Verdict {
   const epsilon = Math.abs(band) * 1e-9;
   return Math.abs(measured - reference) <= band + epsilon ? 'PASS' : 'FAIL';
+}
+
+// ------------------------------------------------- the rule, shared by engine and view
+
+// Capacitance has no OL on lifted probes: it reads lead stray capacitance (pF), which is
+// numeric, so without this a probe lift is a junk near-zero part. A floor of 0 disables it.
+export function isCapacitanceStray(mode: Mode | null, baseValue: number | null, capNoPartFloor: number): boolean {
+  return baseValue !== null && mode === 'CAPACITANCE' && Math.abs(baseValue) < capNoPartFloor;
+}
+
+// An exact zero means nothing is connected, not a part measuring zero: with the probes
+// floating the meter settles on 0 in every supported mode, and a real component never reads
+// a clean 0 (a 0R link still shows lead resistance). Pass/Fail only — the Data Log records a
+// genuine 0 as a real measurement.
+export function partUnderProbes(mode: Mode | null, baseValue: number | null, capNoPartFloor: number): boolean {
+  return baseValue !== null && baseValue !== 0 && !isCapacitanceStray(mode, baseValue, capNoPartFloor);
+}
+
+// Allocation-free: the engine asks it per sample. The base-unit clause guards a stale
+// reference judged in the wrong unit: an unrecognized unit string yields baseUnit '' (or the
+// raw token), which skips the engine's mode-change reset and leaves the old reference live.
+export function canJudge(
+  mode: Mode | null, baseUnit: string, stable: boolean,
+  refEntry: number | null, bandEntry: number | null,
+): mode is SupportedMode {
+  return stable && refEntry !== null && bandEntry !== null &&
+    isSupportedMode(mode) && baseUnit === ENTRY_UNITS[mode].baseUnit;
+}
+
+export function verdictFor(mode: SupportedMode, baseValue: number, refEntry: number, bandEntry: number) {
+  const baseReference = entryToBase(mode, refEntry);
+  const baseBand = entryToBase(mode, bandEntry);
+  return { baseReference, baseBand, verdict: judge(baseValue, baseReference, baseBand), deviation: baseValue - baseReference };
+}
+
+type LiveStatus = 'measuring' | 'no-part' | 'no-reference' | 'settling' | 'deviation';
+
+interface LiveInput {
+  reading: Reading | null;
+  stable: boolean;
+  mode: SupportedMode | null;
+  capNoPartFloor: number;
+  referenceSettled: string;
+  toleranceSettled: string;
+  toleranceMode: ToleranceMode;
+}
+
+// Field states read the settled values, so a field doesn't flash red mid-typing. A too-wide
+// tolerance parses fine, so it is NOT `tolInvalid`: without its own message the view would
+// just refuse to judge and look broken.
+function entryState({ mode, referenceSettled, toleranceSettled, toleranceMode }: LiveInput) {
+  const { ref: refEntry, tol: tolEntry, band: bandEntry } = parseEntry(referenceSettled, toleranceSettled, toleranceMode);
+  return {
+    refEntry, tolEntry, bandEntry,
+    refInvalid: referenceSettled.trim() !== '' && refEntry === null,
+    tolInvalid: toleranceSettled.trim() !== '' && tolEntry === null,
+    tolTooWide: refEntry !== null && tolEntry !== null && isBandTooWide(refEntry, tolEntry, toleranceMode),
+    implausible: mode !== null && refEntry !== null && !isPlausibleReference(mode, refEntry),
+  };
+}
+
+function liveStatus(reading: Reading | null, measured: boolean, entered: boolean, judged: boolean): LiveStatus {
+  if (reading?.isMeasuring) return 'measuring';
+  if (!measured) return 'no-part';
+  if (!entered) return 'no-reference';
+  return judged ? 'deviation' : 'settling';
+}
+
+// The measured value needs no reference and no stability: the operator reads the meter
+// through this view, not just verdicts out of it.
+function measured({ reading, mode, capNoPartFloor }: LiveInput) {
+  const norm = reading ? normalizeReading(reading) : null;
+  return {
+    baseUnit: norm?.baseUnit ?? '',
+    measuredBase: mode !== null && norm !== null && partUnderProbes(mode, norm.baseValue, capNoPartFloor) ? norm.baseValue : null,
+    lsd: reading ? readingResolution(reading) : null,
+  };
+}
+
+export function livePassFail(input: LiveInput) {
+  const { reading, stable, mode } = input;
+  const entry = entryState(input);
+  const { refEntry, bandEntry } = entry;
+  const { baseUnit, measuredBase, lsd } = measured(input);
+  const judged = measuredBase !== null && canJudge(mode, baseUnit, stable, refEntry, bandEntry)
+    ? verdictFor(mode, measuredBase, refEntry!, bandEntry!)
+    : null;
+  // Tolerance narrower than the meter's LSD: every verdict is quantization-limited. Advisory.
+  const belowResolution = mode !== null && bandEntry !== null && lsd !== null && entryToBase(mode, bandEntry) < lsd;
+  return {
+    ...entry, measuredBase, baseUnit, lsd, belowResolution,
+    verdict: judged?.verdict ?? null,
+    deviation: judged?.deviation ?? null,
+    status: liveStatus(reading, measuredBase !== null, refEntry !== null && bandEntry !== null, judged !== null),
+  };
 }
 
 /** One captured part. Reference and tolerance are stored as they were AT CAPTURE, so a

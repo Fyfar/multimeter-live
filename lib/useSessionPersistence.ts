@@ -1,7 +1,6 @@
 'use client';
 
 import { useEffect, useSyncExternalStore } from 'react';
-import type { RestoreResult } from './capture';
 import type { Reading } from './parser';
 import type { PersistSnapshot, SessionPersister } from './sessionPersister';
 import { useRestoreFlow } from './useRestoreFlow';
@@ -16,7 +15,7 @@ import { useUnloadGuard } from './useUnloadGuard';
 export function useSessionPersistence(
   persister: SessionPersister,
   hasRows: boolean,
-  commit: (result: RestoreResult) => void,
+  commit: () => void,
   ingest: (readings: Reading[]) => void,
 ): PersistSnapshot & { restore: ReturnType<typeof useRestoreFlow> } {
   useEffect(() => {
