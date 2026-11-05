@@ -1,6 +1,6 @@
 {
   "$schema": "https://raw.githubusercontent.com/fallow-rs/fallow/main/schema.json",
-  "minimumVersion": "3.32.0",
+  "minimumVersion": "3.39.0",
   // Registered by URL string in components/ServiceWorker.tsx, invisible to the import graph.
   "dynamicallyLoaded": ["public/sw.js"],
   "duplicates": {
@@ -8,19 +8,56 @@
     "threshold": 0.01
   },
   "health": {
-    // Industry defaults (SonarQube's cognitive ceiling is 15). The big React components
-    // already exceed them; `fallow audit` reports only what a change makes worse.
-    "maxCyclomatic": 20,
+    // 20 sat above every function but the 4 known outliers, so it never flagged new growth.
+    // 15 flags the same 4 and catches the next one sooner. Cognitive 15 is SonarQube's ceiling.
+    // `fallow audit` reports only what a change makes worse.
+    "maxCyclomatic": 15,
     "maxCognitive": 15,
+    "maxUnitSize": 60,
     // Pairs with "complexity-crap": "off". Off alone still titles cognitive findings
     // "High CRAP score" in annotations (fallow 3.32); out of reach, CRAP never matches.
-    "maxCrap": 1000000
+    "maxCrap": 1000000,
+    "thresholdOverrides": [
+      {
+        "files": ["components/**/*.tsx", "app/**/*.tsx"],
+        "maxCognitive": 25,
+        "maxUnitSize": 150,
+        "reason": "JSX && and ?: score as cognitive branches; a cohesive view reads as one unit up to ~150 lines"
+      }
+    ]
   },
   "rules": {
     // Complexity advises; dead code and duplication block (their default severity).
     "complexity-cyclomatic": "warn",
     "complexity-cognitive": "warn",
     // CRAP needs coverage data; this repo has none, so every branchy helper would read as 0% covered.
-    "complexity-crap": "off"
+    "complexity-crap": "off",
+    // Zero findings today; guards for when components start nesting.
+    "prop-drilling": "warn",
+    "duplicate-prop-shape": "warn",
+    "thin-wrapper": "warn"
+  },
+  // Layering as a check, chiefly: the Node-runnable core (what scripts/check-*.mts import)
+  // never imports I/O, hooks or UI. It still calls window/document inside functions
+  // (settings.ts, csv.ts), so `calls.forbidden` would be wrong here. First matching zone
+  // wins, so `io` and `hooks` must precede `core`, which owns the rest of lib/. Hooks are
+  // type-only from components so a view takes its state as props.
+  "boundaries": {
+    "zones": [
+      { "name": "app", "patterns": ["app/**"] },
+      { "name": "ui", "patterns": ["components/**"] },
+      { "name": "hooks", "patterns": ["lib/use*.ts"] },
+      { "name": "io", "patterns": ["lib/sessionDb.ts", "lib/sessionPersister.ts", "lib/beep.ts"] },
+      { "name": "core", "patterns": ["lib/**"] },
+      { "name": "checks", "patterns": ["scripts/**"] }
+    ],
+    "rules": [
+      { "from": "app", "allow": ["ui", "hooks", "io", "core"] },
+      { "from": "ui", "allow": ["ui", "io", "core"], "allowTypeOnly": ["hooks"] },
+      { "from": "hooks", "allow": ["hooks", "io", "core"] },
+      { "from": "io", "allow": ["io", "core"] },
+      { "from": "core", "allow": ["core"] },
+      { "from": "checks", "allow": ["core"] }
+    ]
   }
 }

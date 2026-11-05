@@ -49,7 +49,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.3",
-    "fallow": "3.32.0",
+    "fallow": "3.39.0",
     "tailwindcss": "^4.3.1",
     "typescript": "^5"
   }

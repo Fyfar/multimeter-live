@@ -5,6 +5,15 @@ import nextTs from "eslint-config-next/typescript";
 const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
+  {
+    // Shape limits fallow doesn't measure (it counts per function, not nesting/params/file).
+    files: ["app/**", "components/**", "lib/**"],
+    rules: {
+      "max-depth": ["warn", 4],
+      "max-params": ["warn", 5],
+      "max-lines": ["warn", { max: 500, skipBlankLines: true, skipComments: true }],
+    },
+  },
   // Override default ignores of eslint-config-next.
   globalIgnores([
     // Default ignores of eslint-config-next:
