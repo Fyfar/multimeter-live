@@ -5,7 +5,7 @@
 // screen still looks fine, so this is the only place a regression in what gets recorded shows.
 
 import assert from 'node:assert/strict';
-import { CaptureEngine, type CaptureSettings, type EngineView } from '../lib/capture.ts';
+import { CaptureEngine, displayScale, type CaptureSettings, type EngineView } from '../lib/capture.ts';
 import { SampleStore, CHUNK, MODES, RETENTION_MS } from '../lib/samples.ts';
 import { isSupportedMode, livePassFail, parseEntry, resolveBand } from '../lib/passfail.ts';
 import type { Mode, Reading } from '../lib/parser.ts';
@@ -257,6 +257,25 @@ const tenKOnView = () => {
   const v = rd('VOLTAGE', '1.000', 'V');
   const v2 = view(e, [v, rd('VOLTAGE', '1.000', 'V')]);
   eq([store.count, v2.sessionStart, v2.unit], [5, v.ts, 'V'], 'the anchor is the first NEW-unit sample');
+}
+
+// --- display scale: recorded values while the chart has samples, else the live reading ---
+{
+  const scale = (store: SampleStore, e: CaptureEngine, live: Reading | null) => {
+    const s = displayScale(store, e.view, live);
+    return [s.binWidth, s.centerValue];
+  };
+  const { store, e } = fresh({ preserveOnModeChange: true });
+  e.ingest([R('10.000')]);
+  eq(scale(store, e, R('9.50')), [10, 9_500], 'empty: the live reading\'s LSD and value');
+  eq([scale(store, e, OL()), scale(store, e, null)], [[undefined, undefined], [undefined, undefined]], 'empty, live OL or none: nothing');
+  e.setRecording(true, true);
+  e.ingest([R('10.000'), R('10.000')]);
+  eq(scale(store, e, OL()), [1, 10_000], 'recorded: frozen resolution and dominant value, live OL ignored');
+  const volts = rd('VOLTAGE', '1.000', 'V');
+  e.ingest([volts]);
+  eq([store.count > 0, e.view.recordedResolution], [true, null], 'preserve-log change: old rows kept, resolution nulled');
+  eq(scale(store, e, volts), [0.001, 1], 'past the watermark nothing is visible: the live reading, not the old rows');
 }
 
 // --- Pass/Fail rows follow "Keep log on mode change" -----------------------------------

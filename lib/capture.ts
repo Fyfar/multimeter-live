@@ -75,6 +75,25 @@ export interface EngineView {
   readonly passFailRows: VerdictRow[];
 }
 
+// Bin width (also the y-axis LSD floor and every resolution-derived decimal count) and the
+// histogram window centre. With samples the chart can see: the frozen recorded values, so both
+// hold when logging stops or the live reading auto-ranges or goes OL. With none: the live
+// reading, as a preview. Gates on the post-watermark count, never `store.count`: after a
+// preserve-log mode change the store keeps the old unit's rows while both recorded values are
+// null, which would take the histogram off the LSD grid and drop the floor and the decimals.
+export function displayScale(
+  store: Pick<SampleStore, 'count' | 'firstSeq'>,
+  view: Pick<EngineView, 'chartFromSeq' | 'recordedResolution' | 'dominantValue'>,
+  live: Reading | null,
+): { binWidth?: number; centerValue?: number } {
+  if (store.count - (view.chartFromSeq - store.firstSeq) > 0) {
+    return { binWidth: view.recordedResolution ?? undefined, centerValue: view.dominantValue ?? undefined };
+  }
+  const value = live ? normalizeReading(live).baseValue : null;
+  if (live === null || value === null) return {};
+  return { binWidth: readingResolution(live) ?? undefined, centerValue: value };
+}
+
 export interface RestoreInput {
   mode: string;
   unit: string;

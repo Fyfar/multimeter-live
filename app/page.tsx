@@ -3,11 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { clsx } from 'clsx';
 import { ChevronDown, Moon, Sun } from 'lucide-react';
-import { DigitalDisplay } from '@/components/DigitalDisplay';
-import { RealtimeChart, nextChartType, type ChartType } from '@/components/RealtimeChart';
-import { Controls, PanelStrip, RecordButton } from '@/components/Controls';
+import { nextChartType, type ChartType } from '@/components/RealtimeChart';
 import { Sidebar } from '@/components/Sidebar';
-import { StatisticsPanel } from '@/components/StatisticsPanel';
+import { Dashboard } from '@/components/Dashboard';
 import { DataLog } from '@/components/DataLog';
 import { Settings } from '@/components/Settings';
 import { NoDataWarning } from '@/components/NoDataWarning';
@@ -15,11 +13,9 @@ import { PassFail } from '@/components/PassFail';
 import { History } from '@/components/History';
 import { ShortcutHelp } from '@/components/ShortcutHelp';
 import { ClearConfirm, SaveIndicator, SessionConfirm, SessionNotices } from '@/components/SessionNotices';
-import {
-  displayUnit, normalizeReading, readingResolution, type Reading,
-} from '@/lib/parser';
+import type { Reading } from '@/lib/parser';
 import { SampleStore } from '@/lib/samples';
-import { CaptureEngine } from '@/lib/capture';
+import { CaptureEngine, displayScale } from '@/lib/capture';
 import { exportVerdictsCsv, isSupportedMode } from '@/lib/passfail';
 import { useSerial } from '@/lib/useSerial';
 import { useBle } from '@/lib/useBle';
@@ -35,7 +31,6 @@ import { useBeeper } from '@/lib/useBeeper';
 import { useNoDataAlarm } from '@/lib/useNoDataAlarm';
 import { SessionPersister, type SaveStatus } from '@/lib/sessionPersister';
 import { isBusy, type ConnectionStatus, type Transport } from '@/lib/connection';
-import { toFinite } from '@/lib/settings';
 import { exportSamplesCsv } from '@/lib/csv';
 // App version — single source of truth is package.json "version". Bump it on every
 // change (see AGENTS.md "Versioning") so the footer reflects what's deployed.
@@ -47,18 +42,6 @@ const CLEAR_SAVE_MS = 2000;
 // alone — the operator is looking at the parts, not the screen.
 const PASS_TONE = { hz: 1180, ms: 90 };
 const FAIL_TONE = { hz: 300, ms: 280 };
-
-// An inverted manual range (minimum at or above maximum) describes no window at all. Applying it
-// would hand Chart.js `min > max`, which silently renders an empty or upside-down axis — so it is
-// ignored and auto-scaling continues, and Controls says so instead of leaving the operator to
-// wonder why their numbers did nothing.
-function resolveRange(autoScale: boolean, min: string, max: string) {
-  const lo = toFinite(min);
-  const hi = toFinite(max);
-  const rangeInvalid = !autoScale && lo !== null && hi !== null && lo >= hi;
-  const manual = !autoScale && !rangeInvalid;
-  return { rangeInvalid, yMin: manual ? (lo ?? undefined) : undefined, yMax: manual ? (hi ?? undefined) : undefined };
-}
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
   connected: 'Connected',
@@ -153,7 +136,7 @@ function AppHeader({ status, detail, saveStatus, theme, onToggleTheme, connectio
 export default function Home() {
   const { settings, updateSettings } = usePersistedSettings();
   const {
-    baud, rangeMin, rangeMax, autoScale, timeRange, stableOnly, stabilityCount, hysteresisPct,
+    baud, stableOnly, stabilityCount, hysteresisPct,
     preserveOnModeChange, noDataWarning, noDataAudio, capNoPartFloor, verdictAudio,
   } = settings;
   const { theme, toggleTheme } = useTheme();
@@ -340,36 +323,9 @@ export default function Home() {
   // (which renders the unsupported-mode explanation).
   const passFailMode = current && isSupportedMode(current.mode) ? current.mode : null;
 
-  // Stays on the statistics, NOT on store.count: statistics are session-scoped and
-  // legitimately exceed the retained window past seven days, and this is deliberately 0
-  // after a preserve-log reset. Reading the store here would put two differently-valued
-  // tiles labelled "Samples" on one screen.
-  const recordedCount = ev.stats?.count ?? 0;
   // What the Clear and Restore dialogs promise about the live session.
   const keepLive = persister.willKeep({ count: sampleCount, verdicts: ev.passFailRows.length, notes: store.noteCount });
-  const canExport = sampleCount > 0;
-  const { rangeInvalid, yMin: effectiveYMin, yMax: effectiveYMax } = resolveRange(autoScale, rangeMin, rangeMax);
-  // Histogram bin width + stat decimals. With data present, use the frozen coarsest
-  // recorded resolution so both stay stable when logging stops and the live value
-  // auto-ranges or goes OL; when empty, derive from the live reading as a preview.
-  const liveNumeric = current && normalizeReading(current).baseValue !== null ? current : null;
-  // Samples the CHART can see — everything at or after the watermark. Deliberately not
-  // `sampleCount`: after a preserve-log mode change the store still holds the previous
-  // unit's rows while `recordedResolution` and `dominantValue` have just been nulled, so
-  // gating on the store would resolve both to `undefined` and silently switch the histogram
-  // off the LSD grid, switch off the ±20 LSD y-axis floor, and drop the Statistics panels'
-  // resolution-derived decimals to their 3-decimal fallback.
-  const chartCount = Math.max(0, store.count - (ev.chartFromSeq - store.firstSeq));
-  const binWidth =
-    chartCount > 0
-      ? (ev.recordedResolution ?? undefined)
-      : (liveNumeric ? (readingResolution(liveNumeric) ?? undefined) : undefined);
-  // Histogram window center: the time-dominant recorded value when data is present
-  // (outliers fall into under/over-range bins), else the live reading for preview.
-  const centerValue =
-    chartCount > 0
-      ? (ev.dominantValue ?? undefined)
-      : (liveNumeric ? (normalizeReading(liveNumeric).baseValue ?? undefined) : undefined);
+  const { binWidth, centerValue } = displayScale(store, ev, current);
 
   return (
     <div className="flex h-dvh flex-col bg-canvas">
@@ -412,69 +368,28 @@ export default function Home() {
         />
 
         {view === 'dashboard' ? (
-          <>
-            {/* Main content */}
-            <main tabIndex={-1} className="min-w-0 flex-1 overflow-y-auto p-5 focus:outline-none">
-              <div className="flex flex-col gap-4">
-                <DigitalDisplay
-                  reading={current}
-                  recording={ev.recording}
-                  sampleCount={recordedCount}
-                />
-                <PanelStrip label="Controls" expanded={sheet === 'dashboard'} onOpen={() => openSheet('dashboard')}>
-                  <RecordButton recording={ev.recording} canRecord={status === 'connected'} onToggle={handleToggleRecord} />
-                </PanelStrip>
-                <RealtimeChart
-                  store={store}
-                  sampleVersion={ev.version}
-                  chartFromSeq={ev.chartFromSeq}
-                  chartEpoch={ev.chartEpoch}
-                  counts={engine.counts}
-                  stableOnly={stableOnly}
-                  sessionStart={ev.sessionStart}
-                  unit={ev.unit}
-                  yMin={effectiveYMin}
-                  yMax={effectiveYMax}
-                  timeRange={timeRange}
-                  onTimeRangeChange={(v) => updateSettings({ timeRange: v })}
-                  chartType={chartType}
-                  onChartTypeChange={setChartType}
-                  binWidth={binWidth}
-                  centerValue={centerValue}
-                  theme={theme}
-                />
-                <StatisticsPanel stats={ev.stats} baseUnit={ev.unit} resolution={binWidth} />
-              </div>
-            </main>
-
-            {/* Right panel */}
-            <Controls
-              rangeMin={rangeMin}
-              rangeMax={rangeMax}
-              rangeInvalid={rangeInvalid}
-              onRangeMinChange={(v) => updateSettings({ rangeMin: v })}
-              onRangeMaxChange={(v) => updateSettings({ rangeMax: v })}
-              autoScale={autoScale}
-              onAutoScaleChange={(v) => updateSettings({ autoScale: v })}
-              triggerThreshold={trigger.threshold}
-              onTriggerThresholdChange={trigger.setThreshold}
-              triggerArmed={trigger.armed}
-              onTriggerArmedChange={trigger.setArmed}
-              canArm={(toFinite(trigger.threshold) ?? 0) > 0 && status === 'connected'}
-              triggerUnit={displayUnit(ev.unit)}
-              recording={ev.recording}
-              onToggleRecord={handleToggleRecord}
-              canRecord={status === 'connected'}
-              stableOnly={stableOnly}
-              onStableOnlyChange={handleStableOnlyChange}
-              onClear={requestClear}
-              canClear={sampleCount > 0}
-              onExportCsv={exportCsv}
-              canExport={canExport}
-              open={sheet === 'dashboard'}
-              onClose={closeSheet}
-            />
-          </>
+          <Dashboard
+            engineView={ev}
+            store={store}
+            counts={engine.counts}
+            reading={current}
+            connected={status === 'connected'}
+            settings={settings}
+            onSettingsChange={updateSettings}
+            trigger={trigger}
+            chartType={chartType}
+            onChartTypeChange={setChartType}
+            theme={theme}
+            binWidth={binWidth}
+            centerValue={centerValue}
+            onToggleRecord={handleToggleRecord}
+            onStableOnlyChange={handleStableOnlyChange}
+            onClear={requestClear}
+            onExportCsv={exportCsv}
+            panelOpen={sheet === 'dashboard'}
+            onOpenPanel={() => openSheet('dashboard')}
+            onClosePanel={closeSheet}
+          />
         ) : view === 'data-log' ? (
           <DataLog
             reading={current}
