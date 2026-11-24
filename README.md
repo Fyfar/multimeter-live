@@ -16,6 +16,12 @@ account, no backend. Your data never leaves your machine.
 This fork's default connection is **OpenOSC SCPI** over the ZT703S USB-C cable; the
 original UART and Bluetooth transports remain available for stock firmware.
 
+**Deploying this fork:** on a freshly forked repository, enable **Actions**
+(Settings → Actions → General → "Allow all actions and reusable workflows") and set
+**Pages → Build and deployment → Source** to **GitHub Actions**. The
+`Deploy to GitHub Pages` workflow then publishes `out/` from every push to `main` at
+`https://<owner>.github.io/multimeter-live/`.
+
 ## Features
 
 - **Live readout and trend chart**, from a 10-second window to the whole session.
