@@ -19,6 +19,7 @@ import { CaptureEngine, displayScale } from '@/lib/capture';
 import { exportVerdictsCsv, isSupportedMode } from '@/lib/passfail';
 import { useSerial } from '@/lib/useSerial';
 import { useBle } from '@/lib/useBle';
+import { useScpi } from '@/lib/useScpi';
 import { useShortcuts } from '@/lib/useShortcuts';
 import { useLiveTitle } from '@/lib/useLiveTitle';
 import { useSessionPersistence } from '@/lib/useSessionPersistence';
@@ -59,12 +60,19 @@ const STATUS_DOT: Record<ConnectionStatus, string> = {
 
 // At most one transport holds the slot. The combined status is the active one's; with
 // none active it is `unsupported` only when neither transport is supported.
-function resolveConnection(
-  uart: ConnectionStatus, ble: ConnectionStatus, baud: number, deviceName: string | null,
-) {
-  const active: Transport | null = isBusy(ble) ? 'ble' : isBusy(uart) ? 'uart' : null;
+function resolveConnection({ uart, ble, scpi, baud, deviceName, scpiDeviceName }: {
+  uart: ConnectionStatus;
+  ble: ConnectionStatus;
+  scpi: ConnectionStatus;
+  baud: number;
+  deviceName: string | null;
+  scpiDeviceName: string | null;
+}) {
+  const active: Transport | null = isBusy(scpi) ? 'scpi' : isBusy(ble) ? 'ble' : isBusy(uart) ? 'uart' : null;
+  if (active === 'scpi') return { active, status: scpi, detail: `OpenOSC · ${scpiDeviceName ?? 'SCPI'}` };
   if (active === 'ble') return { active, status: ble, detail: `BLE · ${deviceName}` };
-  const status: ConnectionStatus = uart === 'unsupported' && ble !== 'unsupported' ? 'disconnected' : uart;
+  const status: ConnectionStatus =
+    uart === 'unsupported' && ble !== 'unsupported' && scpi !== 'unsupported' ? 'disconnected' : uart;
   return { active, status, detail: `UART · ${baud} bps` };
 }
 
@@ -257,7 +265,15 @@ export default function Home() {
 
   const serial = useSerial(handleReadings);
   const ble = useBle(handleReadings);
-  const { active, status, detail } = resolveConnection(serial.status, ble.status, baud, ble.deviceName);
+  const scpi = useScpi(handleReadings);
+  const { active, status, detail } = resolveConnection({
+    uart: serial.status,
+    ble: ble.status,
+    scpi: scpi.status,
+    baud,
+    deviceName: ble.deviceName,
+    scpiDeviceName: scpi.deviceName,
+  });
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- intentional: reset recording on disconnect
@@ -277,13 +293,21 @@ export default function Home() {
 
   const { connect: serialConnect, clearError: clearSerialError } = serial;
   const { connect: bleConnect, clearError: clearBleError } = ble;
+  const { connect: scpiConnect, clearError: clearScpiError, disconnect: scpiDisconnect } = scpi;
+  const handleScpiConnect = useCallback(
+    () => unlessBusy(serial.status, clearSerialError,
+      () => unlessBusy(ble.status, clearBleError, scpiConnect)),
+    [serial.status, clearSerialError, ble.status, clearBleError, scpiConnect],
+  );
   const handleConnect = useCallback(
-    () => unlessBusy(ble.status, clearBleError, () => serialConnect(baud)),
-    [ble.status, clearBleError, serialConnect, baud],
+    () => unlessBusy(ble.status, clearBleError,
+      () => unlessBusy(scpi.status, clearScpiError, () => serialConnect(baud))),
+    [ble.status, clearBleError, scpi.status, clearScpiError, serialConnect, baud],
   );
   const handleBleConnect = useCallback(
-    () => unlessBusy(serial.status, clearSerialError, bleConnect),
-    [serial.status, clearSerialError, bleConnect],
+    () => unlessBusy(serial.status, clearSerialError,
+      () => unlessBusy(scpi.status, clearScpiError, bleConnect)),
+    [serial.status, clearSerialError, scpi.status, clearScpiError, bleConnect],
   );
   const handleToggleRecord = useCallback(() => {
     // Manual toggle → this session is not trigger-owned, so never auto-stop it.
@@ -357,9 +381,11 @@ export default function Home() {
         <Sidebar
           uart={{ status: serial.status, error: serial.error, connect: handleConnect, disconnect: serial.disconnect }}
           ble={{ status: ble.status, error: ble.error, connect: handleBleConnect, disconnect: ble.disconnect }}
+          scpi={{ status: scpi.status, error: scpi.error, connect: handleScpiConnect, disconnect: scpiDisconnect }}
           baud={baud}
           onBaudChange={(v) => updateSettings({ baud: v })}
           deviceName={ble.deviceName}
+          scpiDeviceName={scpi.deviceName}
           activeTransport={active}
           active={view}
           onNavChange={navigate}

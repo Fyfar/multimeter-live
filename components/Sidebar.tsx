@@ -32,10 +32,11 @@ const STATUS_VIEW: Record<ConnectionStatus, { label: string; className: string }
   unsupported: { label: 'Disconnected', className: 'text-muted' },
 };
 
-const TRANSPORT_LABEL: Record<Transport, string> = { uart: 'UART', ble: 'Bluetooth' };
+const TRANSPORT_LABEL: Record<Transport, string> = { uart: 'UART', ble: 'Bluetooth', scpi: 'OpenOSC' };
 const UNSUPPORTED_REASON: Record<Transport, string> = {
   uart: 'Web Serial is not supported in this browser.',
   ble: 'Bluetooth is not supported in this browser.',
+  scpi: 'Web Serial is not supported in this browser.',
 };
 
 type Conn = {
@@ -147,12 +148,23 @@ function BleRows({ status, deviceName }: { status: ConnectionStatus; deviceName:
   );
 }
 
+function ScpiRows({ status, deviceName }: { status: ConnectionStatus; deviceName: string | null }) {
+  if (status !== 'connected' || !deviceName) return null;
+  return (
+    <Row label="Model">
+      <span className="truncate pl-2 text-fg">{deviceName}</span>
+    </Row>
+  );
+}
+
 export function Sidebar({
   uart,
   ble,
+  scpi,
   baud,
   onBaudChange,
   deviceName,
+  scpiDeviceName,
   activeTransport,
   active,
   onNavChange,
@@ -161,20 +173,22 @@ export function Sidebar({
 }: {
   uart: Conn;
   ble: Conn;
+  scpi: Conn;
   baud: number;
   onBaudChange: (b: number) => void;
   deviceName: string | null;
+  scpiDeviceName: string | null;
   activeTransport: Transport | null;
   active: NavId;
   onNavChange: (id: NavId) => void;
   connectionOpen: boolean;
   onConnectionClose: () => void;
 }) {
-  const [picked, setPicked] = useState<Transport>('uart');
+  const [picked, setPicked] = useState<Transport>('scpi');
   // Locked to the busy transport, so the shown body is never the blocked one: the only
   // reason its Connect can be disabled is browser support.
   const shown = activeTransport ?? picked;
-  const conn = shown === 'uart' ? uart : ble;
+  const conn = shown === 'uart' ? uart : shown === 'ble' ? ble : scpi;
 
   return (
     // Compact: a bar along the bottom (the body row is flex-col-reverse there, so it stays
@@ -212,24 +226,20 @@ export function Sidebar({
       >
         <div className="space-y-3 rounded-lg border border-border bg-panel p-3 max-lg:m-3">
           <h3 className="hidden text-xs font-semibold text-fg lg:block">Connection</h3>
-          <div role="group" aria-label="Transport" className="flex gap-1">
-            {(['uart', 'ble'] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => setPicked(t)}
-                disabled={activeTransport !== null && activeTransport !== t}
-                aria-pressed={shown === t}
-                aria-describedby={activeTransport && activeTransport !== t ? 'transport-locked' : undefined}
-                className={clsx(
-                  'flex-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40',
-                  shown === t
-                    ? 'border-accent bg-accent/10 text-accent'
-                    : 'border-border text-muted hover:bg-surface hover:text-fg',
-                )}
-              >
-                {TRANSPORT_LABEL[t]}
-              </button>
-            ))}
+          <div className="flex items-center justify-between text-xs">
+            <label htmlFor="transport-select" className="text-muted">Transport</label>
+            <select
+              id="transport-select"
+              value={shown}
+              onChange={(e) => setPicked(e.target.value as Transport)}
+              disabled={activeTransport !== null}
+              aria-describedby={activeTransport ? 'transport-locked' : undefined}
+              className="rounded-sm border border-border bg-surface px-1.5 py-0.5 text-xs text-fg disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value="scpi">OpenOSC</option>
+              <option value="uart">UART</option>
+              <option value="ble">Bluetooth</option>
+            </select>
           </div>
           {activeTransport && (
             <p id="transport-locked" className="text-[11px] leading-snug text-muted">
@@ -248,8 +258,10 @@ export function Sidebar({
                 baud={baud}
                 onBaudChange={onBaudChange}
               />
-            ) : (
+            ) : shown === 'ble' ? (
               <BleRows status={ble.status} deviceName={deviceName} />
+            ) : (
+              <ScpiRows status={scpi.status} deviceName={scpiDeviceName} />
             )}
           </ConnectionBody>
         </div>

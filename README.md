@@ -31,8 +31,12 @@ account, no backend. Your data never leaves your machine.
   Sessions are kept for 30 days; short tests (under 30 samples, no verdict or note) are not.
 - **Smart capture.** Record only stable values, or let a trigger threshold start and stop
   recording for you.
-- **USB or Bluetooth.** Use a USB-UART adapter, or go wireless with a BLE serial module
-  wired to the meter. Your USB adapter reconnects on its own when you come back.
+- **OpenOSC SCPI (default), USB, or Bluetooth.** Connect directly to a ZT703S running
+  [OpenOSC](https://github.com/bve/OpenOSC) — its USB-CDC port speaks SCPI, so no
+  UART adapter is needed. The OpenOSC transport is selected by default; it switches the
+  instrument to DMM mode, polls `READ?` at the meter's ~3 Hz rate, and maps functions
+  and ranges into the same readings pipeline. The original USB-UART and BLE transports
+  are still available for stock firmware.
 - **Desktop, tablet and phone.** The layout adapts to the screen.
 - **Installable and offline.** Install it like a native app; after the first visit it
   needs no network. Updates never interrupt a recording.
@@ -42,8 +46,10 @@ account, no backend. Your data never leaves your machine.
 
 ## What you need
 
-**Meter:** a **ZOYI ZT703s** (tested on firmware 1.6.27). The ZT703s+ and ZT706 likely
-speak the same protocol but are untested. For Bluetooth, a BLE serial module set to
+**Meter:** a **ZOYI ZT703s**. Stock firmware 1.6.27 works with the USB-UART and BLE
+transports; **OpenOSC** (0.21.10 tested) works with the default SCPI transport over the
+meter's USB-C cable — no adapter or extra wiring. The ZT703s+ and ZT706 likely speak the
+same stock protocol but are untested. For Bluetooth, a BLE serial module set to
 **115200 baud**: tested with a **JDY-23**; HM-10 and its clones will probably work.
 
 **Browser:**
