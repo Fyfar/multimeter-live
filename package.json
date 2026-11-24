@@ -8,10 +8,10 @@
   "description": "Real-time browser dashboard for the ZOYI ZT703s multimeter over Web Serial or Bluetooth LE (Web Bluetooth) — live readings, trend chart, session stats, and CSV export. No backend.",
   "license": "MIT",
   "author": "Fyfar (https://github.com/Fyfar)",
-  "homepage": "https://github.com/Fyfar/multimeter-live#readme",
+  "homepage": "https://fcolasuonno.github.io/multimeter-live/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Fyfar/multimeter-live.git"
+    "url": "git+https://github.com/fcolasuonno/multimeter-live.git"
   },
   "keywords": [
     "zoyi",

@@ -4,14 +4,17 @@
 noise at a glance, log a week of data, and sort parts pass/fail by ear. No install, no
 account, no backend. Your data never leaves your machine.
 
-[![Build](https://img.shields.io/github/actions/workflow/status/Fyfar/multimeter-live/deploy.yml?branch=main&label=build)](https://github.com/Fyfar/multimeter-live/actions/workflows/deploy.yml)
-[![Version](https://img.shields.io/github/package-json/v/Fyfar/multimeter-live?label=version&color=3b82f6)](https://github.com/Fyfar/multimeter-live/blob/main/package.json)
+[![Build](https://img.shields.io/github/actions/workflow/status/fcolasuonno/multimeter-live/deploy.yml?branch=main&label=build)](https://github.com/fcolasuonno/multimeter-live/actions/workflows/deploy.yml)
+[![Version](https://img.shields.io/github/package-json/v/fcolasuonno/multimeter-live?label=version&color=3b82f6)](https://github.com/fcolasuonno/multimeter-live/blob/main/package.json)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)](./LICENSE)
 ![Stack: Next.js · React · TypeScript · Tailwind · Chart.js](https://img.shields.io/badge/stack-Next.js%2016%20·%20React%2019%20·%20TypeScript%20·%20Tailwind%20v4-3b82f6)
 
 ![Multimeter·Live dashboard with the live digital readout, trend chart, and session statistics](./images/dashboard.png)
 
-### **[Open the app →](https://fyfar.github.io/multimeter-live/)**
+### **[Open the app →](https://fcolasuonno.github.io/multimeter-live/)**
+
+This fork's default connection is **OpenOSC SCPI** over the ZT703S USB-C cable; the
+original UART and Bluetooth transports remain available for stock firmware.
 
 ## Features
 
