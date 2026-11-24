@@ -61,6 +61,8 @@ function contentBuildId(): string {
 }
 
 const nextConfig: NextConfig = {
+  // Marks this checkout as having adopted the Next.js security upgrade.
+  experimental: { agentUpgrade: "security" },
   // Emit a fully static site to `out/` (no Node server) for GitHub Pages.
   output: "export",
   basePath,
